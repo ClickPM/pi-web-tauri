@@ -182,7 +182,7 @@ SSE after 8s: readyState=1 opened=true msgs=1   ← readyState 1 = 仍在流
 ```rust
 let mut info = ExtendedLimitInfo::new();
 info.limit_kill_on_job_close();
-let job = Job::create_with_limit_info(&mut info)?;
+let job = Job::create_with_limit_info(&info)?;
 // ...
 job.assign_process(child.as_raw_handle() as isize)?;
 ```
@@ -370,7 +370,7 @@ Rust 侧（`guard.rs`）只做三件事：拼命令行、解析那一行 JSON、
 | 4 | 重启后主题 / 未读 / 隐藏目录等偏好保持不变 | ✅ `localStorage` 标记跨「强杀 + 重启」读回；端口全程复用 35566 |
 | 5 | 目录选择器弹原生对话框并回传路径 | ✅ 取消分支返回 `null`，确定分支返回 `"D:\\variFlight_work\\pi-web-tauri"`，两条都端到端到达页面 |
 | 6 | 「检查更新」走通：查版本 → 安装 → 服务重启 → 页面刷新 | ✅ 自动静默更新端到端：`0.9.0 → 0.9.1`，staging 安装 → 校验 → 原子换入 → 复用同一端口重启 → 页面刷新。结果 toast 也实测渲染（`已是最新版本 · pi-web 0.9.1 · pi-coding-agent 0.85.1`）。**交互式菜单项的确认弹窗未点过，见下方** |
-| 7 | 能打出 NSIS 安装包并在干净目录安装运行 | 🔄 安装包已产出（`Pi_0.4.0_x64-setup.exe`，86MB，装出 30,976 文件 / 521.6MB，`node/` `runtime-seed/` `guard/` 齐全）。**首次安装实测启动失败**，暴露了坑 6.5 的 verbatim 路径问题；已修复，重新打包验证中 |
+| 7 | 能打出 NSIS 安装包并在干净目录安装运行 | ✅ `Pi_0.4.0_x64-setup.exe`（86MB）静默装到干净目录 `D:\PiTauriTest`，装出 30,976 文件 / 521.6MB；启动后 guard 校验通过（6 个原生模块 0 失败）、复用已有端口 35566、服务起来、cookie 鉴权成功、页面侧注入脚本工作。装好的这份也做了强杀测试：**21 个子孙进程全部回收** |
 | 8 | 全程无 `unsafe` | ✅ `grep -rn "unsafe" src-tauri/src` 为空 |
 
 附带：`npm run test:guard`（从 Electron 版原样搬来的运行时守卫回归测试）**69 passed, 0 failed**。
