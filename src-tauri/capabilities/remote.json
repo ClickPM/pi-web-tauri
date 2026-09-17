@@ -1,14 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "remote-pi-web",
-  "description": "The embedded pi-web origin. WITHOUT this capability a remote http:// page gets no working __TAURI_INTERNALS__.invoke at all, and the directory picker, theme sync and update CTA all silently die (see PORTING.md, 坑 2).\n\nThe permission list is EXACTLY the four app commands and nothing else — no core:*, no plugin:* — because pi-web renders agent-produced content in the same world as our injection script, and anything the ACL grants here is granted to that content too. Every one of the four is parameterless or takes a single string that is immediately narrowed to dark|light, and each one's worst case is a native dialog the user must confirm, a page reload, an npm install of one fixed package from one fixed registry, or a repainted title bar.\n\nRust->page traffic goes the other way, through webview.eval(), which needs no permission at all — which is why the update toast, the npm progress line and the session-cookie injection add nothing to this list.",
+  "description": "The embedded pi-web origin. WITHOUT this capability a remote http:// page gets no working __TAURI_INTERNALS__.invoke at all, and the directory picker, theme sync and update CTA all silently die (see PORTING.md, 坑 2).\n\nThe permission list is EXACTLY the three app commands and nothing else — no core:*, no plugin:* — because pi-web renders agent-produced content in the same world as our injection script, and anything the ACL grants here is granted to that content too. Every one of the three is parameterless or takes a single string that is immediately narrowed to dark|light, and each one's worst case is a native dialog the user must confirm, an npm install of one fixed package from one fixed registry, or a repainted title bar.\n\nRust->page traffic goes the other way, through webview.eval(), which needs no permission at all — which is why the update toast, the npm progress line and the session-cookie injection add nothing to this list.",
   "remote": {
     "urls": ["http://127.0.0.1:*"]
   },
   "windows": ["main"],
   "permissions": [
     "allow-select-directory",
-    "allow-reload-page",
     "allow-theme-changed",
     "allow-apply-update"
   ]

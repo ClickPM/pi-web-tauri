@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use crate::job::ProcessJob;
 use crate::log_dbg;
+use crate::proc::NoConsole;
 use crate::paths::Paths;
 
 /// The pi CLI package name, as pi-subagents spells it when validating a package
@@ -292,12 +293,7 @@ impl Server {
             cmd.env(k, v);
         }
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        cmd.no_console();
 
         let mut child = cmd
             .spawn()
@@ -505,8 +501,13 @@ impl Server {
         {
             // /T takes the tree (the Next.js grandchild included), /F skips the
             // graceful path Windows does not really have for console-less nodes.
+            //
+            // `.no_console()` is what stops this flashing a black console window
+            // on the way out — it runs on every app close, so a missing flag
+            // here is visible to the user every single time.
             let killed = Command::new("taskkill")
                 .args(["/pid", &self.pid.to_string(), "/t", "/f"])
+                .no_console()
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();

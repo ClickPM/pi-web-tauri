@@ -13,8 +13,9 @@
  *
  *   - everything here is reachable (and forgeable) by page script;
  *   - the four commands it can reach are therefore deliberately parameterless
- *     or trivially-typed, and each one's worst case is a dialog, a reload, or
- *     an npm install of one fixed package from one fixed registry.
+ *     or trivially-typed, and each one's worst case is a native dialog the user
+ *     must confirm, a menu bar toggling, a repainted title bar, or an npm
+ *     install of one fixed package from one fixed registry.
  *
  * See PORTING.md ("坑 2" and "坑 8") for the full threat note.
  *
@@ -38,9 +39,9 @@
   }
 
   // Only the embedded pi-web page gets the UI grafts; the shell's own status
-  // pages must not get a reload bar, a viewport reserve, or — worst of all — a
-  // theme report, which would overwrite the user's saved theme with whatever
-  // colour the splash happens to be.
+  // pages must not get the notice-shelf restyling, the brand rename, or — worst
+  // of all — a theme report, which would overwrite the user's saved theme with
+  // whatever colour the splash happens to be.
   //
   // The Electron original keyed this off `location.protocol !== "http:"`, which
   // no longer discriminates: Tauri serves the bundled pages over http too
@@ -320,209 +321,6 @@
       parent.appendChild(st);
     }
     inject();
-  });
-
-  // ---------------------------------------------------------------------------
-  // Bottom strip: reload button (browser-style ⟳) + reserve space
-  // ---------------------------------------------------------------------------
-  onPiWeb(function mountBottomBar() {
-
-    var BAR_H = 30;
-    var reduceMotion =
-      typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    var host = null;
-    var bar = null;
-
-    function whenBodyReady(cb) {
-      if (document.body) cb();
-      else document.addEventListener("DOMContentLoaded", cb, { once: true });
-    }
-
-    function ensureBarHost() {
-      if (host && document.body && document.body.contains(host)) return host;
-      host = document.createElement("div");
-      host.id = "pi-web-desktop-dashboard-host";
-      var s = host.style;
-      s.position = "fixed";
-      s.left = "0";
-      s.right = "0";
-      s.bottom = "0";
-      s.height = BAR_H + "px";
-      s.zIndex = "2147483600";
-      s.pointerEvents = "none";
-      host.attachShadow({ mode: "open" });
-      document.body.appendChild(host);
-      buildBar();
-      return host;
-    }
-
-    function viewportReserveValue() {
-      return "calc(100dvh - " + BAR_H + "px)";
-    }
-
-    function applyViewportReserve() {
-      var root = document.documentElement;
-      if (!root) return;
-      if (root.style.getPropertyValue("--app-viewport-height") !== viewportReserveValue()) {
-        root.style.setProperty("--app-viewport-height", viewportReserveValue());
-      }
-    }
-
-    function guardViewportReserve() {
-      applyViewportReserve();
-      try {
-        new MutationObserver(function () {
-          applyViewportReserve();
-        }).observe(document.documentElement, {
-          attributes: true,
-          attributeFilter: ["style"],
-        });
-      } catch (e) {
-        /* ignore */
-      }
-      var vv = window.visualViewport;
-      if (vv) {
-        vv.addEventListener("resize", applyViewportReserve);
-        vv.addEventListener("scroll", applyViewportReserve);
-      }
-    }
-
-    function ensureReserveStyle() {
-      if (document.getElementById("pi-web-desktop-reserve-style")) return;
-      var st = document.createElement("style");
-      st.id = "pi-web-desktop-reserve-style";
-      st.textContent =
-        "[data-piwd-reserve]{height:calc(100dvh - " +
-        BAR_H +
-        "px) !important;max-height:calc(100dvh - " +
-        BAR_H +
-        "px) !important;}";
-      (document.head || document.documentElement).appendChild(st);
-    }
-
-    function tagAppRoot() {
-      var kids = (document.body && document.body.children) || [];
-      for (var i = 0; i < kids.length; i++) {
-        var el = kids[i];
-        if (
-          el === host ||
-          el.id === "pi-web-desktop-cta-host" ||
-          el.id === "pi-web-desktop-dashboard-host"
-        ) {
-          continue;
-        }
-        var h = el.tagName === "DIV" && el.style ? el.style.height.replace(/\s+/g, "") : "";
-        if (h === "100dvh" || h === "var(--app-viewport-height,100dvh)") {
-          if (!el.hasAttribute("data-piwd-reserve")) el.setAttribute("data-piwd-reserve", "1");
-          return true;
-        }
-      }
-      return false;
-    }
-
-    function setupReserve() {
-      ensureReserveStyle();
-      guardViewportReserve();
-      tagAppRoot();
-      try {
-        new MutationObserver(function () {
-          tagAppRoot();
-        }).observe(document.body, { childList: true });
-      } catch (e) {
-        /* ignore */
-      }
-    }
-
-    function buildReloadChip() {
-      var chip = document.createElement("button");
-      chip.type = "button";
-      chip.setAttribute("aria-label", "重新加载页面");
-      chip.title = "重新加载 (Ctrl+R)";
-      var cs = chip.style;
-      cs.pointerEvents = "auto";
-      cs.display = "flex";
-      cs.alignItems = "center";
-      cs.justifyContent = "center";
-      cs.cursor = "pointer";
-      cs.border = "none";
-      cs.background = "transparent";
-      cs.color = "var(--text-muted, #6b7280)";
-      cs.fontFamily = UI;
-      cs.fontSize = "14px";
-      cs.lineHeight = "1";
-      cs.padding = "5px 8px";
-      cs.borderRadius = "0";
-      cs.transition = "background .15s ease, color .15s ease";
-      chip.addEventListener("mouseenter", function () {
-        chip.style.background = "color-mix(in srgb, var(--text, #1a1a1a) 8%, transparent)";
-        chip.style.color = "var(--text, #1a1a1a)";
-      });
-      chip.addEventListener("mouseleave", function () {
-        chip.style.background = "transparent";
-        chip.style.color = "var(--text-muted, #6b7280)";
-      });
-
-      var glyph = document.createElement("span");
-      glyph.textContent = "⟳";
-      glyph.style.display = "inline-block";
-      glyph.style.fontSize = "15px";
-
-      var reloading = false;
-      chip.addEventListener("click", function (e) {
-        e.stopPropagation();
-        if (reloading) return;
-        reloading = true;
-        if (!reduceMotion) {
-          try {
-            glyph.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], {
-              duration: 600,
-              iterations: Infinity,
-              easing: "linear",
-            });
-          } catch (err) {
-            /* WAAPI unavailable */
-          }
-        }
-        // Driven from the shell rather than location.reload() so it ignores the
-        // HTTP cache — after an embedded-server restart the page must not come
-        // back from a stale cache.
-        invoke("reload_page").catch(function () {
-          location.reload();
-        });
-      });
-
-      chip.appendChild(glyph);
-      return chip;
-    }
-
-    function buildBar() {
-      var root = host.shadowRoot;
-
-      bar = document.createElement("div");
-      var bs = bar.style;
-      bs.boxSizing = "border-box";
-      bs.width = "100%";
-      bs.height = "30px";
-      bs.display = "flex";
-      bs.alignItems = "center";
-      bs.justifyContent = "flex-start";
-      bs.padding = "0 14px";
-      bs.fontFamily = UI;
-      bs.fontSize = "12px";
-      bs.color = "var(--text-muted, #6b7280)";
-      bs.background = "var(--bg-panel, #ffffff)";
-      bs.borderTop = "1px solid var(--border, rgba(0,0,0,0.06))";
-      bs.pointerEvents = "none";
-
-      bar.appendChild(buildReloadChip());
-      root.appendChild(bar);
-    }
-
-    whenBodyReady(function () {
-      ensureBarHost();
-      setupReserve();
-    });
   });
 
   // ---------------------------------------------------------------------------

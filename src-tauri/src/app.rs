@@ -25,6 +25,7 @@ use crate::guard::Guard;
 use crate::job::ProcessJob;
 use crate::log_dbg;
 use crate::paths::Paths;
+use crate::proc::NoConsole;
 use crate::server::{self, Server};
 
 pub const MAIN_WINDOW: &str = "main";
@@ -361,13 +362,8 @@ fn copy_runtime(src: &Path, dst: &Path) -> Result<(), String> {
         .arg(dst)
         .args(["/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP", "/R:1", "/W:1", "/MT:16"])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+        .stderr(std::process::Stdio::null())
+        .no_console();
     let status = cmd.status().map_err(|e| format!("robocopy failed to run: {e}"))?;
     match status.code() {
         Some(code) if code >= 8 => Err(format!("robocopy failed (code {code})")),

@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::log_dbg;
 use crate::paths::Paths;
+use crate::proc::NoConsole;
 
 pub const DEFAULT_REGISTRY: &str = "https://registry.npmmirror.com";
 
@@ -127,13 +128,8 @@ impl Guard {
             .arg(&self.log)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+            .stderr(Stdio::piped())
+            .no_console();
         cmd
     }
 

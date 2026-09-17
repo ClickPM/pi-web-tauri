@@ -1,4 +1,4 @@
-//! The complete page -> shell surface. Four commands, and that is the point.
+//! The complete page -> shell surface. Three commands, and that is the point.
 //!
 //! In Electron this lived behind `contextIsolation: true`, so only what
 //! `contextBridge` exposed was reachable and the page could not forge calls
@@ -6,12 +6,12 @@
 //! page in question renders agent-produced content — so treat every one of
 //! these as callable by a hostile string.
 //!
-//! Hence the shape of the list: three take no arguments at all, the fourth
-//! takes one string that is immediately narrowed to `dark | light`. Their worst
-//! cases are, in order: a native folder dialog the user has to confirm; a page
-//! reload; an npm install of ONE hardcoded package from ONE configured
-//! registry; a repainted title bar. Nothing here accepts a path, a URL, a
-//! command line, or a package name from the page.
+//! Hence the shape of the list: two take no arguments at all, the third takes
+//! one string that is immediately narrowed to `dark | light`. Their worst cases
+//! are, in order: a native folder dialog the user has to confirm; a repainted
+//! title bar; an npm install of ONE hardcoded package from ONE configured
+//! registry. Nothing here accepts a path, a URL, a command line, or a package
+//! name from the page.
 
 use tauri::{AppHandle, Manager, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
@@ -47,23 +47,6 @@ pub async fn select_directory(window: WebviewWindow) -> Result<Option<String>, S
     let result = picked.map(|p| p.to_string());
     log_dbg!("select_directory: returning {result:?}");
     Ok(result)
-}
-
-/// Backend for the injected bottom bar's reload button. Same effect as the
-/// menu's 重新加载 (Ctrl+R), reachable without unhiding the menu.
-///
-/// Electron used `reloadIgnoringCache()` here, because after an embedded-server
-/// restart the page must not come back from a stale cache. Tauri has no
-/// cache-ignoring variant, so this is an ordinary reload — which still
-/// revalidates the top-level document (Chromium sends `Cache-Control: max-age=0`
-/// for a user reload), and Next.js serves its assets under content-hashed URLs,
-/// so the gap is narrow. Recorded in PORTING.md rather than papered over.
-#[tauri::command]
-pub fn reload_page(window: WebviewWindow) -> Result<(), String> {
-    window.reload().map_err(|e| {
-        log_dbg!("reload-page error {e}");
-        e.to_string()
-    })
 }
 
 /// pi-web's light/dark toggle -> the native window frame. Fire-and-forget from

@@ -36,8 +36,8 @@ pi-web-tauri/
 │   │   ├── paths.rs            # 运行时/资源/userData 路径解析
 │   │   ├── migrate.rs          # 老 userData 与老运行时回退目录的一次性收养
 │   │   ├── theme.rs            # theme-state.json ↔ 窗口主题
-│   │   ├── commands.rs         # 页面能调的全部 4 个命令
-│   │   ├── menu.rs             # 应用菜单
+│   │   ├── commands.rs         # 页面能调的全部 3 个命令
+│   │   ├── menu.rs             # 应用菜单（常显，末尾是「刷新」按钮）
 │   │   └── log.rs              # %TEMP%/pi-web-desktop-debug.log
 │   ├── inject/preload.js       # 注入页面的自定义 UI（Electron preload.js 的移植）
 │   ├── resources/guard/
@@ -46,9 +46,9 @@ pi-web-tauri/
 │   │   └── guard-cli.js        # 唯一的新胶水：把上面两个包成 JSON CLI
 │   ├── capabilities/
 │   │   ├── default.json        #   本地状态页（不给任何命令）
-│   │   └── remote.json         #   http://127.0.0.1:* + 逐个 allow 的 4 个命令
+│   │   └── remote.json         #   http://127.0.0.1:* + 逐个 allow 的 3 个命令
 │   ├── nsis/hooks.nsh          # 安装器钩子：检测并卸载 Electron 旧版
-│   ├── build.rs                # 声明 4 个命令 → 生成 allow-* 权限（必需，见 PORTING 坑 2）
+│   ├── build.rs                # 声明 3 个命令 → 生成 allow-* 权限（必需，见 PORTING 坑 2）
 │   ├── icons/                  # tauri icon 生成的全套图标
 │   └── tauri.conf.json
 ├── vendor/node/                # 内置 Node.js 运行时 → resources/node        ← 构建输入
@@ -175,6 +175,6 @@ npm run build:dir   # 只编译不打包（调试更快）
 
 Electron preload 跑在**隔离世界**，`contextIsolation` 挡住了页面脚本。Tauri 的注入脚本跑在**页面主世界** —— 而 pi-web 页面里渲染的是智能体产出的内容。**这层隔离没有了。**
 
-所以 `src-tauri/src/commands.rs` 里只有 4 个命令，且三个不收参数、一个只收一个立刻收窄成 `dark|light` 的字符串。加新命令前先问：**如果这个命令被页面里一段恶意字符串调用，最坏会发生什么？** 答案必须是「弹个用户还得确认的对话框」这个量级。
+所以 `src-tauri/src/commands.rs` 里只有 3 个命令，且两个不收参数、一个只收一个立刻收窄成 `dark|light` 的字符串。加新命令前先问：**如果这个命令被页面里一段恶意字符串调用，最坏会发生什么？** 答案必须是「弹个用户还得确认的对话框」这个量级。
 
-反方向（Rust → 页面）走 `webview.eval()`，不需要任何 ACL 权限，所以 `capabilities/remote.json` 的 `permissions` 是空的 —— 这是故意的，别往里加。
+反方向（Rust → 页面）走 `webview.eval()`，**不需要任何 ACL 权限** —— 更新 toast、npm 进度行、会话 cookie 注入都没有在 capability 里留下口子。所以 `capabilities/remote.json` 的 `permissions` 里只有那 3 个 `allow-*`，没有任何 `core:*` / `plugin:*`；别往里加。

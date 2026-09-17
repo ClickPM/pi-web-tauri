@@ -61,7 +61,7 @@ Electron 版做到了**零端口**：FD 3/4 匿名管道 + `pi-app://` 特权协
 **做了什么**：
 
 - `src-tauri/capabilities/remote.json` 声明 `"remote": { "urls": ["http://127.0.0.1:*"] }`。**没有它，远程页面里的 `__TAURI_INTERNALS__.invoke` 全废**，目录选择器 / 主题同步 / 更新 toast 一起死。
-- `build.rs` 用 `AppManifest::commands([...])` 声明那 4 个应用命令，`remote.json` 再逐个 `allow-*` 授权。`withGlobalTauri` 设为 `false`。
+- `build.rs` 用 `AppManifest::commands([...])` 声明那 3 个应用命令，`remote.json` 再逐个 `allow-*` 授权。`withGlobalTauri` 设为 `false`。
 
 ### 这里第一版做错了，而且错得很隐蔽
 
@@ -75,17 +75,16 @@ Tauri 的规则是：**没有 app manifest 时，应用命令在本地页面放�
 
 修法是在 `build.rs` 里声明命令，让 Tauri 生成 `allow-<命令名>`（下划线换成短横线）权限，再在 capability 里逐个列出。副作用正好是想要的：**现在连本地页面也必须被逐个授权**，而外壳自己的状态页一个命令都不需要，所以 `default.json` 里一个都没给。
 
-**为什么权限清单只有这 4 个**：pi-web 页面里渲染的是**智能体产出的内容**，和我们的注入脚本在同一个世界。任何 ACL 能授予的能力，都等于顺手授给了那段内容。所以：
+**为什么权限清单只有这 3 个**：pi-web 页面里渲染的是**智能体产出的内容**，和我们的注入脚本在同一个世界。任何 ACL 能授予的能力，都等于顺手授给了那段内容。所以：
 
-- **页面 → 外壳**：只有 `src-tauri/src/commands.rs` 里的 4 个应用命令。三个不收参数，第四个只收一个立刻收窄成 `dark|light` 的字符串。
+- **页面 → 外壳**：只有 `src-tauri/src/commands.rs` 里的 3 个应用命令。两个不收参数，第三个只收一个立刻收窄成 `dark|light` 的字符串。
 - **外壳 → 页面**：全部走 `webview.eval()`，**不需要任何权限**。所以更新 toast、npm 进度行、会话 cookie 注入都没有在 capability 里留下任何口子。
 
-**四个命令的最坏情况**：
+**三个命令的最坏情况**：
 
 | 命令 | 参数 | 被恶意调用时最坏会怎样 |
 |---|---|---|
 | `select_directory` | 无 | 弹一个用户必须自己点的原生目录对话框 |
-| `reload_page` | 无 | 页面重载 |
 | `theme_changed` | `dark`\|`light` | 标题栏变色 |
 | `apply_update` | 无 | 从**固定 registry** 装**固定包** `@agegr/pi-web@latest`（包名、版本、registry 都在 Rust 侧写死） |
 
@@ -300,7 +299,7 @@ Error: EISDIR: illegal operation on a directory, lstat 'D:'
 
 ## 坑 8 —— preload → initialization_script
 
-`electron/preload.js`（497 行）几乎 1:1 搬到 `src-tauri/inject/preload.js`：更新结果 toast、notice shelf 可读性修复、底部重载条 + viewport reserve、主题同步、品牌改名，逻辑与样式全部保留。
+`electron/preload.js`（497 行）几乎 1:1 搬到 `src-tauri/inject/preload.js`：更新结果 toast、notice shelf 可读性修复、主题同步、品牌改名，逻辑与样式全部保留。**唯一删掉的是底部重载条 + 那 30px viewport reserve** —— 按所有者要求退役，重载改成菜单栏上的「刷新」按钮（见下方 `autoHideMenuBar` 一行）。
 
 替换掉的只有三处通道：
 
@@ -349,7 +348,7 @@ Rust 侧（`guard.rs`）只做三件事：拼命令行、解析那一行 JSON、
 
 | 项 | Electron | Tauri | 说明 |
 |---|---|---|---|
-| `autoHideMenuBar` | 菜单默认隐藏，按 Alt 唤出 | **菜单常驻可见** | Tauri 有 `hide_menu()/show_menu()`，但没有能把 Alt 按键接回来的途径。**未达成**，纯观感差异。菜单加了 `&` 助记符（`Alt+A` / `Alt+E` / `Alt+V`），Electron 版原本没有 |
+| `autoHideMenuBar` | 菜单默认隐藏，按 Alt 唤出 | **菜单常驻可见** | **写出来了，实测后撤掉，见下条**。菜单加了 `&` 助记符（`Alt+A` / `Alt+E` / `Alt+V`），Electron 版原本没有；菜单栏末尾多了一个顶级「刷新(&R)」按钮，接管原来页面底部那条重载条 |
 | `reloadIgnoringCache()` | 重载并绕过 HTTP 缓存 | **普通重载** | Tauri 没有绕缓存的变体。**未完全达成**：普通重载仍然会重新校验顶层文档（Chromium 用户重载会发 `Cache-Control: max-age=0`），且 Next.js 的静态资源走内容哈希 URL，所以缺口很窄 —— 但它确实不是原来的语义 |
 | `app.setAppUserModelId()` | 显式调用 | 依赖打包身份 | Tauri 未暴露安全绑定，Win32 调用需要 `unsafe`。打包版由 NSIS 快捷方式与 bundle identity 保证；**仅 `tauri dev` 下任务栏分组身份缺失**，不影响发布产物 |
 | 视图菜单的缩放项 | `resetZoom`/`zoomIn`/`zoomOut` | 只留全屏 | Tauri 的 `PredefinedMenuItem` 没有缩放项；页面内 Ctrl+ +/- 仍可用 |
@@ -357,6 +356,22 @@ Rust 侧（`guard.rs`）只做三件事：拼命令行、解析那一行 JSON、
 | 调试日志 | `%TEMP%\pi-web-desktop-debug.log` | **同一个文件** | `guard-cli.js` 以 `[guard]` 前缀写同一份，一条时间线看完整个启动 |
 | `ensureBridgeOnDisk()` | 从 asar 解出桥接文件 | **已删除** | Tauri 没有 asar，且管道层整体丢弃 |
 | 首帧背景色 | `backgroundColor: "#0A0A0A"` | `background_color(...)` | 一致，避免白闪 |
+
+### 关于 `autoHideMenuBar`：为什么最后是常显
+
+这条做过完整实现，也实测过，最后由所有者决定撤回。记在这里是因为**中间踩到的两件事对以后动菜单的人有用**，且撤回不是"没做"而是"做了不成立"。
+
+实现过的版本：Rust 侧 `window.hide_menu()` 起手隐藏 + 一个 `menu_bar(show: bool)` 命令；注入脚本监听裸 Alt 的 keyup 调 `show: true`，点回内容区调 `show: false`。
+
+两个非显而易见的坑：
+
+1. **`hide_menu()` 必须在 `set_menu()` 之后调**。反过来写不报错 —— `set_menu` 会把菜单重新挂到每个窗口上，先前的隐藏被静默撤销。判据只能从 Win32 侧看：`GetMenu(hwnd)` 非 NULL。
+2. **菜单栏出现时 webview 被 resize，光标底下随即收到一个 mousedown**（实测 6–7ms 后到），正好被"点内容区收起"那条逻辑吃掉 —— 日志里是 `menu bar shown` 紧跟 `menu bar hidden`，表现出来是"按 Alt 什么都没发生"。加了 400ms 窗口 + `detail === 0` 合成事件过滤才稳。同一轮还把命令从 toggle 改成显式 `show: bool`，因为 toggle 不幂等，而 Alt 语义上只可能是"显示"。
+
+**撤回的原因**：Alt 的 keyup 要进到页面，取决于 WebView2 那个子窗口当时有没有键盘焦点。这条链路我没有可靠办法验证（合成 Alt 四次只进去三次），而所有者实际用下来判定"Alt 这条路有问题"。既然菜单是**唯一**能到「检查更新 / 重启内嵌服务 / 开发者工具 / 刷新」的入口，一个不保证能唤出来的入口不可接受 —— 所以整条撤掉，菜单栏常显，`menu_bar` 命令一并删除（页面 → 外壳的命令面因此从 4 个回到 3 个）。
+
+**与 Electron 的差异因此是确定的**：菜单栏常占顶部一行，这是纯观感差异，功能无损。
+
 
 ---
 

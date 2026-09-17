@@ -9,11 +9,10 @@ fn main() {
     // directory picker, theme sync and update CTA were all dead there while
     // looking fine on the shell's own pages. With the manifest, every origin has
     // to be granted each command by name, and capabilities/remote.json spells
-    // out exactly these four.
+    // out exactly these three.
     let attributes = tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "select_directory",
-            "reload_page",
             "theme_changed",
             "apply_update",
         ]),

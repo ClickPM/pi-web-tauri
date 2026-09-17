@@ -13,6 +13,7 @@ pub mod log;
 mod menu;
 mod migrate;
 mod paths;
+mod proc;
 mod server;
 mod theme;
 
@@ -46,7 +47,6 @@ pub fn run() {
         }))
         .invoke_handler(tauri::generate_handler![
             commands::select_directory,
-            commands::reload_page,
             commands::theme_changed,
             commands::apply_update,
         ])
@@ -131,6 +131,10 @@ pub fn run() {
             // window would make the shell present as something else.
             window.set_title("Pi")?;
 
+            // The bar stays visible; Electron's `autoHideMenuBar` is not
+            // reproduced. See PORTING.md — reveal-on-Alt was built and measured,
+            // and the Alt press does not reach the page reliably enough to be
+            // the only way to the menu.
             let menu = menu::build(&handle)?;
             tauri_app.set_menu(menu)?;
             tauri_app.on_menu_event(|app, event| {

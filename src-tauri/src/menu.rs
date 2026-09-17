@@ -1,15 +1,20 @@
-//! Application menu — the same three submenus main.js built.
+//! Application menu — main.js's three submenus, plus the reload button.
 //!
-//! One behavioural difference from Electron: `autoHideMenuBar` has no Tauri
-//! equivalent (there is `hide_menu`/`show_menu`, but nothing surfaces the Alt
-//! press that would bring it back), so the bar is simply visible. Noted in
-//! PORTING.md rather than silently dropped.
+//! The bar is always visible. Electron's `autoHideMenuBar` is not reproduced;
+//! PORTING.md records why the reveal-on-Alt version was withdrawn.
+//!
+//! 刷新 is a TOP-LEVEL item rather than a submenu entry: it is a button, not a
+//! menu, and it replaces the floating chip the injected script used to draw in
+//! a 30px strip along the bottom of the page.
 
 use tauri::menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Manager, Runtime};
 
 pub const ID_CHECK_UPDATES: &str = "check-updates";
 pub const ID_RELOAD: &str = "reload";
+/// The menu-bar reload button. A separate id from ID_RELOAD because two menu
+/// items may not share one; both route to the same action.
+pub const ID_RELOAD_BUTTON: &str = "reload-button";
 pub const ID_RESTART_SERVER: &str = "restart-server";
 pub const ID_DEVTOOLS: &str = "devtools";
 
@@ -51,8 +56,13 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&PredefinedMenuItem::fullscreen(app, Some("全屏"))?)
         .build()?;
 
+    // A bare item in the menu bar: clicking it fires straight through to
+    // `handle` instead of dropping a submenu. No accelerator here — Ctrl+R is
+    // already on the App submenu's 重新加载, and two items cannot claim it.
+    let reload_button = MenuItemBuilder::with_id(ID_RELOAD_BUTTON, "刷新(&R)").build(app)?;
+
     MenuBuilder::new(app)
-        .items(&[&app_menu, &edit_menu, &view_menu])
+        .items(&[&app_menu, &edit_menu, &view_menu, &reload_button])
         .build()
 }
 
@@ -62,7 +72,7 @@ pub fn handle(app: &AppHandle, id: &str) {
             let app = app.clone();
             std::thread::spawn(move || crate::app::check_for_updates(&app, true));
         }
-        ID_RELOAD => {
+        ID_RELOAD | ID_RELOAD_BUTTON => {
             if let Some(win) = crate::app::main_window(app) {
                 let _ = win.reload();
             }
