@@ -50,5 +50,6 @@
         "installerHooks": "nsis/hooks.nsh"
       }
     }
-  }
+  },
+  "mainBinaryName": "Pi"
 }

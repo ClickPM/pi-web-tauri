@@ -22,6 +22,13 @@ rand = "0.8"
 url = "2"
 
 [target."cfg(windows)".dependencies]
+# Strips the Windows verbatim prefix (backslash-backslash-question-backslash)
+# that Tauri's resource_dir() returns in a PACKAGED build. Node cannot resolve a
+# main module through that prefix — it dies with
+# "EISDIR: illegal operation on a directory, lstat 'D:'" — so every path handed
+# to the bundled node has to be simplified first. dunce does it correctly,
+# including leaving genuinely long paths (which need the prefix) alone.
+dunce = "1"
 # Safe wrapper over Win32 job objects — the whole reason the shell can promise
 # that killing it takes the node tree with it. See PORTING.md ("坑 5").
 win32job = "2"

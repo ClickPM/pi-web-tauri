@@ -245,6 +245,45 @@ electron-builder 把卸载记录写在 `HKCU\...\Uninstall\{0872d550-066b-5742-b
 
 `src-tauri/nsis/hooks.nsh` 的 `NSIS_HOOK_PREINSTALL` 读那个键，找到就**询问**用户是否先卸载（不是直接卸载 —— 悄悄卸载别的应用不是安装器该自己决定的事），静默安装（`/S`）时跳过。
 
+### 调用静默安装的正确姿势（测试脚本踩过）
+
+自动化安装测试当时是这么调的：
+
+```powershell
+Start-Process -FilePath $setup -ArgumentList "/S","/D=$target" -Wait   # ← 错的
+```
+
+PowerShell 会**给每个参数加引号**。证据是安装完成后注册表里的 `InstallLocation` 变成了**带引号的** `"D:\PiTauriTest"` —— 引号被当成路径的一部分写了进去。NSIS 对这两个开关的要求很具体：`/S` 必须是裸的，`/D` 必须放在最后且不加引号，否则行为不可预期（`/S` 可能不被识别，安装就不是静默的）。
+
+修法：命令行整条交给 `cmd.exe` 拼，不经过 PowerShell 的参数引用。
+
+顺带把安装器那侧也调保守了：`MessageBox` 加 `MB_DEFBUTTON2`，默认按钮改成「否」。卸载**别人的**应用不该是一次误触回车就能触发的事 —— 静默路径由 `IfSilent` 挡着，交互路径现在由默认按钮挡着。
+
+---
+
+## 坑 6.5 —— 打包版才会出现的 `\\?\` verbatim 路径 ★ dev 永远看不到
+
+不在原始清单里，是安装实测逼出来的。
+
+打包版里 Tauri 的 `resource_dir()` 返回的是 **verbatim 路径**：
+
+```
+paths: dev=false base=\\?\D:\PiTauriTest
+```
+
+而 **node 无法用这种路径解析主模块**。把 `\\?\D:\...\guard\guard-cli.js` 当脚本参数传过去，node 在跑第一行代码之前就死了：
+
+```
+Error: EISDIR: illegal operation on a directory, lstat 'D:'
+    at resolveMainPath (node:internal/modules/run_main:39:23)
+```
+
+于是 guard 根本没运行，启动直接落到 error 页。
+
+**`tauri dev` 永远暴露不了这个** —— dev 的 base 来自 `CARGO_MANIFEST_DIR`，是一条普通路径。所以在 dev 里跑得再顺，也不能替代一次真实安装。
+
+**修法**（`paths.rs`）：在 `Paths::resolve` 里用 `dunce::simplified()` 把前缀剥掉一次，下游所有路径（guard CLI、`bin/pi-web.js`、`--runtime` / `--node-dir` 参数、子进程 cwd）自然都变成普通路径。用 `dunce` 而不是自己 `strip_prefix`，是因为它只在**去掉前缀后仍然可用**时才去掉 —— 真正超长的路径需要那个前缀，不能一刀切。
+
 ---
 
 ## 坑 7 —— WebView2 Runtime 依赖
@@ -331,7 +370,7 @@ Rust 侧（`guard.rs`）只做三件事：拼命令行、解析那一行 JSON、
 | 4 | 重启后主题 / 未读 / 隐藏目录等偏好保持不变 | ✅ `localStorage` 标记跨「强杀 + 重启」读回；端口全程复用 35566 |
 | 5 | 目录选择器弹原生对话框并回传路径 | ✅ 取消分支返回 `null`，确定分支返回 `"D:\\variFlight_work\\pi-web-tauri"`，两条都端到端到达页面 |
 | 6 | 「检查更新」走通：查版本 → 安装 → 服务重启 → 页面刷新 | ✅ 自动静默更新端到端：`0.9.0 → 0.9.1`，staging 安装 → 校验 → 原子换入 → 复用同一端口重启 → 页面刷新。结果 toast 也实测渲染（`已是最新版本 · pi-web 0.9.1 · pi-coding-agent 0.85.1`）。**交互式菜单项的确认弹窗未点过，见下方** |
-| 7 | 能打出 NSIS 安装包并在干净目录安装运行 | ⬜ 见下方 |
+| 7 | 能打出 NSIS 安装包并在干净目录安装运行 | 🔄 安装包已产出（`Pi_0.4.0_x64-setup.exe`，86MB，装出 30,976 文件 / 521.6MB，`node/` `runtime-seed/` `guard/` 齐全）。**首次安装实测启动失败**，暴露了坑 6.5 的 verbatim 路径问题；已修复，重新打包验证中 |
 | 8 | 全程无 `unsafe` | ✅ `grep -rn "unsafe" src-tauri/src` 为空 |
 
 附带：`npm run test:guard`（从 Electron 版原样搬来的运行时守卫回归测试）**69 passed, 0 failed**。

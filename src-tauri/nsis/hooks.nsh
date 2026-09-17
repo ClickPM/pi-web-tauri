@@ -33,7 +33,10 @@ piwd_legacy_found:
   ; back either — a silent install simply leaves the old app in place.
   IfSilent piwd_legacy_done
 
-  MessageBox MB_YESNO|MB_ICONQUESTION \
+  ; MB_DEFBUTTON2 makes "否" the default. Uninstalling someone else's
+  ; application should not be one stray Enter away: the silent path is guarded
+  ; by IfSilent above, and this guards the interactive one.
+  MessageBox MB_YESNO|MB_ICONQUESTION|MB_DEFBUTTON2 \
     "检测到旧版 Pi（Electron 版）。$\n$\n它与本版本会并排安装，并且会争用同一个数据目录，建议先卸载。$\n$\n是否现在卸载旧版？（会话与模型凭证保存在 ~/.pi/agent，不会被删除）" \
     /SD IDNO IDNO piwd_legacy_done
 

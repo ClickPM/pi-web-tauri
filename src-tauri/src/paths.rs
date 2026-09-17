@@ -35,9 +35,19 @@ impl Paths {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         } else {
-            app.path()
-                .resource_dir()
-                .expect("resource dir must resolve in a packaged build")
+            // In a packaged build this comes back as a VERBATIM path
+            // (\\?\D:\...). Everything under here is eventually handed to the
+            // bundled node — as a script argument, a --flag, or a cwd — and node
+            // cannot resolve a main module through that prefix: it fails with
+            // "EISDIR: illegal operation on a directory, lstat 'D:'" before it
+            // runs a single line. Simplifying once, here, is what keeps every
+            // downstream path usable. This only reproduces in a packaged build;
+            // `tauri dev` hands out a plain path and looks perfectly fine.
+            simplify(
+                app.path()
+                    .resource_dir()
+                    .expect("resource dir must resolve in a packaged build"),
+            )
         };
 
         let user_data = default_user_data_dir();
@@ -206,6 +216,20 @@ pub fn legacy_user_data_dirs() -> Vec<PathBuf> {
         .iter()
         .map(|n| parent.join(n))
         .collect()
+}
+
+/// Drop the Windows verbatim prefix when the path works without it.
+///
+/// `dunce` leaves a path alone when it genuinely needs the prefix (too long, or
+/// a device path), so this never turns a working long path into a broken one.
+#[cfg(windows)]
+fn simplify(p: PathBuf) -> PathBuf {
+    dunce::simplified(&p).to_path_buf()
+}
+
+#[cfg(not(windows))]
+fn simplify(p: PathBuf) -> PathBuf {
+    p
 }
 
 /// main.js's `isWritable()`: actually write a probe file rather than trusting
