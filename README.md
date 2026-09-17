@@ -10,7 +10,7 @@
 - ⚡ **就地运行，首启秒开** —— 直接从（可写的）安装目录跑 pi-web，不做首启复制。
 - 🔄 **运行时自更新** —— App 内「检查更新」直接装 `@agegr/pi-web@latest`，走 **staging + 校验通过才原子换入**，更新失败/断网/中途被杀都不会损坏正在用的运行时。
 - 🩺 **启动自检与自愈** —— 每次启动验证运行时原生模块是否真的能加载；发现是安装被中断留下的残缺文件，自动按锁定版本重装修复（不趁机升级）。
-- 🔒 **回环 + 每次启动随机口令** —— 服务只听 `127.0.0.1`，并带 HTTP Basic Auth（口令每次启动重新生成、只存在内存里）。
+- 🔒 **回环 + 每次启动随机口令** —— 服务只听 `127.0.0.1`；口令每次启动重新生成、不落盘，并由外壳在回环上换成会话 cookie，**口令本身从不进入页面**（需要 pi-web ≥ 0.9.1，更低版本的降级见 PORTING.md 坑 4）。
 - 🪟 **进程树由内核连坐回收** —— Job Object + `KILL_ON_JOB_CLOSE`：外壳被**任务管理器强杀**，node 与 next 子孙进程一并消失。
 - 🦀 **外壳无 `unsafe`** —— `grep -rn "unsafe" src-tauri/src` 为空。
 
@@ -45,17 +45,20 @@ pi-web-tauri/
 │   │   ├── updater.js          # ★ 同上
 │   │   └── guard-cli.js        # 唯一的新胶水：把上面两个包成 JSON CLI
 │   ├── capabilities/
-│   │   ├── default.json        #   本地状态页
-│   │   └── remote.json         #   http://127.0.0.1:* —— 没有它页面侧全废
+│   │   ├── default.json        #   本地状态页（不给任何命令）
+│   │   └── remote.json         #   http://127.0.0.1:* + 逐个 allow 的 4 个命令
 │   ├── nsis/hooks.nsh          # 安装器钩子：检测并卸载 Electron 旧版
+│   ├── build.rs                # 声明 4 个命令 → 生成 allow-* 权限（必需，见 PORTING 坑 2）
 │   ├── icons/                  # tauri icon 生成的全套图标
 │   └── tauri.conf.json
 ├── vendor/node/                # 内置 Node.js 运行时 → resources/node        ← 构建输入
 ├── runtime-seed/               # @agegr/pi-web 的 npm 生产安装 → resources/runtime-seed ← 构建输入
 ├── scripts/
 │   ├── seed-node.ps1           # 供给 vendor/node（从 Electron 版原样复用）
-│   └── test-runtime-guard.js   # 运行时守卫回归测试（npm run test:guard）
-└── build/                      # 图标 SVG 源 + _make_icons.js
+│   ├── test-runtime-guard.js   # 运行时守卫回归测试（npm run test:guard）
+│   └── prune-seed.js           # 打包前删掉 runtime-seed 里的 .map（约 157MB）
+├── build/                      # 图标 SVG 源 + _make_icons.js
+└── PORTING.md                  # 每个坑的实测结论、未达成项与已知降级
 ```
 
 > **构建输入 vs 入库源码**：`vendor/`、`runtime-seed/` 体积大、已 gitignore，需按下文准备。
@@ -77,10 +80,11 @@ pi-web-tauri/
    <node>\node.exe  <runtime>\node_modules\@agegr\pi-web\bin\pi-web.js \
        -H 127.0.0.1 -p <port> --no-open
    ```
-   env：`NODE_ENV=production`、`PATH` 前置内置 node 目录、`PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT`、`PI_WEB_NO_OPEN=1`、`PI_WEB_PASSWORD=<每次启动随机>`。子进程一出生就被塞进 Job Object。
+   env：`NODE_ENV=production`、`PATH` 前置内置 node 目录、`PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT`、`PI_WEB_NO_OPEN=1`、`PI_WEB_PASSWORD=<每次启动随机、不落盘>`。子进程一出生就被塞进 Job Object。
 6. **等就绪**：stdout 的 `Ready` 行 + HTTP 探针，任一先到即可（401 也算就绪 —— 那正是带口令时的正确回答）。
-7. **导航**：窗口先显示 `index.html`，就绪后 navigate 到 `http://pi:<password>@127.0.0.1:<port>/`。
-8. **检查更新**：启动 5 秒后自动静默检查（刚自愈过 2 分钟内跳过），或菜单手动触发。装进兄弟目录 `.runtime-seed.staging` → 同一套校验验收 → `rename` 原子换入 → 重启服务并刷新页面。
+7. **换会话 cookie**：Rust 侧直接在 loopback 上 `POST /api/web-auth` 把口令换成 `pi_web_session` cookie。**口令自始至终不进页面**，页面只拿到那个 token。
+8. **导航**：窗口先显示 `index.html`，就绪后 navigate 到 `http://127.0.0.1:<port>/`（**不带内嵌凭据** —— 带了会让页面里所有相对路径 `fetch()` 直接抛异常，见 PORTING.md 坑 4），首帧加载完成时把 cookie 注入页面并重载一次。
+9. **检查更新**：启动 5 秒后自动静默检查（刚自愈过 2 分钟内跳过），或菜单手动触发。装进兄弟目录 `.runtime-seed.staging` → 同一套校验验收 → `rename` 原子换入 → 重启服务并刷新页面。
 
 ## 目标机器需要什么
 
