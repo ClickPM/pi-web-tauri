@@ -13,7 +13,8 @@
     "seed": "cd runtime-seed && npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com",
     "seed:node": "powershell -ExecutionPolicy Bypass -File scripts/seed-node.ps1",
     "icons": "node build/_make_icons.js",
-    "test:guard": "node scripts/test-runtime-guard.js"
+    "test:guard": "node scripts/test-runtime-guard.js",
+    "prune:seed": "node scripts/prune-seed.js"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.9.0"

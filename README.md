@@ -138,9 +138,13 @@ npm run test:guard
 ## 打包安装程序
 
 ```bash
-npm run build       # 生成 src-tauri/target/release/bundle/nsis/Pi_<ver>_x64-setup.exe
+npm run build       # 生成 <target>/release/bundle/nsis/Pi_<ver>_x64-setup.exe
 npm run build:dir   # 只编译不打包（调试更快）
 ```
+
+> `<target>` 是 cargo 的输出目录；本机设了 `CARGO_TARGET_DIR=D:\target`，所以产物在 `D:\target\release\bundle\nsis\`，**不在项目里**。没设这个变量时才是 `src-tauri/target/`。
+>
+> 打包前会自动跑 `scripts/prune-seed.js`（`tauri.conf.json` 的 `beforeBundleCommand`），把 `runtime-seed` 里的 `.map` 源码映射删掉 —— 这是 electron-builder 里那条 `"!**/*.map"` 过滤的等价物，Tauri 的 `bundle.resources` 没有排除语法所以只能做成一步。pi-web 0.9.1 上是 8,977 个文件、约 157MB。`npm run seed` 会把它们带回来，应用内更新也会（它装的是全新的 npm 树），这一步只影响**装进安装包**的内容。
 
 安装器默认装到 `%LOCALAPPDATA%\Pi`（可写 → 就地运行 → 首启秒开），可在安装页改。
 安装器会检测 Electron 旧版（electron-builder 的卸载注册表项）并**询问**是否先卸载 —— 两者的 NSIS 记录互不相认，不处理就会并排装两份、抢同一个 `~/.pi/agent`。

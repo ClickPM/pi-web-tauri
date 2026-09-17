@@ -57,6 +57,12 @@ fn persist(user_data: &Path, theme: Theme) {
     let _ = std::fs::write(state_file(user_data), body);
 }
 
+/// Window background per theme — pi-web's own `--bg` (globals.css `:root` /
+/// `.dark`). Only shows in the areas the webview exposes before the page paints
+/// (mainly during a resize), so it must never be the opposite colour.
+const BG_DARK: tauri::window::Color = tauri::window::Color(0x1A, 0x1A, 0x1A, 0xFF);
+const BG_LIGHT: tauri::window::Color = tauri::window::Color(0xFF, 0xFF, 0xFF, 0xFF);
+
 /// Adopt the theme the page just reported. Returns the applied theme, or None
 /// when the page sent something we do not understand.
 pub fn set(window: &tauri::WebviewWindow, user_data: &Path, theme: &str) -> Option<Theme> {
@@ -64,6 +70,16 @@ pub fn set(window: &tauri::WebviewWindow, user_data: &Path, theme: &str) -> Opti
     if let Err(e) = window.set_theme(Some(t)) {
         // Cosmetic only — never fail the page's fire-and-forget report on it.
         log_dbg!("theme: set_theme({}) failed: {e}", name(t));
+    }
+    // Repainted even when the theme did not change: the window is created with
+    // the dark splash colour regardless, so the first report after a
+    // light-theme launch still has to correct it.
+    let bg = match t {
+        Theme::Dark => BG_DARK,
+        _ => BG_LIGHT,
+    };
+    if let Err(e) = window.set_background_color(Some(bg)) {
+        log_dbg!("theme: set_background_color failed: {e}");
     }
     if read_persisted(user_data) != Some(t) {
         persist(user_data, t);

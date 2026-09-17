@@ -41,7 +41,18 @@ Electron 版做到了**零端口**：FD 3/4 匿名管道 + `pi-app://` 特权协
 - **端口池避开 49152–65535**。那是 Windows 的动态端口范围，系统会把里面的端口临时派给别的程序。选在范围外，"下次启动它还空着"的概率才高 —— 这正是持久化端口的意义。
 - **不用 pi-web 的默认端口 30141**。固定的知名端口 = 敌意网页可以直接猜。首次随机 + 之后固定，两头都占。
 
-**实测**：首启 `port: selected 35566 and persisted it`；之后每次启动都是 `port: reusing persisted 35566`，跨"自更新 + 服务重启"也保持不变。
+**实测**：首启 `port: selected 35566 and persisted it`；之后每次启动都是 `port: reusing persisted 35566`，跨「自更新 + 服务重启」与跨「强杀进程」都保持不变。
+
+`localStorage` 跨重启的直接验证（页面内探针写标记、重启后读回）：
+
+```
+第 1 次运行   LOCALSTORAGE previous=(none — first run on this origin)
+第 2 次运行   LOCALSTORAGE previous=run@2026-09-17T02:45:35.272Z   ← 上一次运行写的
+```
+
+中间那次是被 `Stop-Process -Force` 强杀的，偏好照样活下来了。
+
+**还有一条相关的失败路径也堵上了**：服务起来了但外壳登录失败时，早先的写法直接丢弃 `Server` 返回错误 —— 而 Rust 的 `Child` 没有 Drop 时 kill 的语义，那个 node 进程会继续占着端口，于是重试时 `resolve_port` 只能另选一个端口，**偏好照样被重置**。现在每条失败路径都显式 `server.stop()`。
 
 ---
 
@@ -50,12 +61,24 @@ Electron 版做到了**零端口**：FD 3/4 匿名管道 + `pi-app://` 特权协
 **做了什么**：
 
 - `src-tauri/capabilities/remote.json` 声明 `"remote": { "urls": ["http://127.0.0.1:*"] }`。**没有它，远程页面里的 `__TAURI_INTERNALS__.invoke` 全废**，目录选择器 / 主题同步 / 更新 toast 一起死。
-- 该 capability 的 `permissions` 是**空数组**，`withGlobalTauri` 设为 `false`。
+- `build.rs` 用 `AppManifest::commands([...])` 声明那 4 个应用命令，`remote.json` 再逐个 `allow-*` 授权。`withGlobalTauri` 设为 `false`。
 
-**为什么权限是空的**：pi-web 页面里渲染的是**智能体产出的内容**，和我们的注入脚本在同一个世界。任何 ACL 能授予的能力，都等于顺手授给了那段内容。所以：
+### 这里第一版做错了，而且错得很隐蔽
 
-- **页面 → 外壳**：只有 `src-tauri/src/commands.rs` 里的 4 个应用命令（应用命令不走 ACL，靠 `remote` 白名单准入）。三个不收参数，第四个只收一个立刻收窄成 `dark|light` 的字符串。
-- **外壳 → 页面**：全部走 `webview.eval()`，**不需要任何权限**。所以更新 toast、进度行、cookie 注入都没有在 capability 里留下任何口子。
+我原以为「应用命令不走 ACL，只要 `remote` 白名单放行 origin 就行」，于是把 `permissions` 写成了空数组。**错的**：
+
+```
+PICKER rejected -> select_directory not allowed. Plugin not found
+```
+
+Tauri 的规则是：**没有 app manifest 时，应用命令在本地页面放行、在远程 origin 一律拒绝**。而外壳自己的状态页是本地页面 —— 所以主题同步在启动页上「工作正常」，一进 pi-web 就全哑了，日志里也只有沉默。判据是 `tauri-utils` 的 `has_app_manifest()`（`APP_ACL_KEY = "__app-acl__"`）。
+
+修法是在 `build.rs` 里声明命令，让 Tauri 生成 `allow-<命令名>`（下划线换成短横线）权限，再在 capability 里逐个列出。副作用正好是想要的：**现在连本地页面也必须被逐个授权**，而外壳自己的状态页一个命令都不需要，所以 `default.json` 里一个都没给。
+
+**为什么权限清单只有这 4 个**：pi-web 页面里渲染的是**智能体产出的内容**，和我们的注入脚本在同一个世界。任何 ACL 能授予的能力，都等于顺手授给了那段内容。所以：
+
+- **页面 → 外壳**：只有 `src-tauri/src/commands.rs` 里的 4 个应用命令。三个不收参数，第四个只收一个立刻收窄成 `dark|light` 的字符串。
+- **外壳 → 页面**：全部走 `webview.eval()`，**不需要任何权限**。所以更新 toast、npm 进度行、会话 cookie 注入都没有在 capability 里留下任何口子。
 
 **四个命令的最坏情况**：
 
@@ -66,7 +89,15 @@ Electron 版做到了**零端口**：FD 3/4 匿名管道 + `pi-app://` 特权协
 | `theme_changed` | `dark`\|`light` | 标题栏变色 |
 | `apply_update` | 无 | 从**固定 registry** 装**固定包** `@agegr/pi-web@latest`（包名、版本、registry 都在 Rust 侧写死） |
 
-**实测**：远程页面上 `tauri=true`、`piDesktop=function`，`theme_changed` 与 cookie 注入均生效。
+**实测**（都在远程 origin `http://127.0.0.1:35566` 的页面上）：
+
+```
+PAGE   origin=http://127.0.0.1:35566 tauri=true piDesktop=function cookie=true
+theme-changed: page reported "light" -> Some(Light)          ← theme_changed 到达 Rust
+select_directory: dialog callback fired (Some(Path("D:\\variFlight_work\\pi-web-tauri")))
+PICKER resolved -> "D:\\variFlight_work\\pi-web-tauri"        ← 路径回到页面
+TOAST  host=true cards=1 text=已是最新版本 ✕ pi-web 0.9.1 …    ← eval 方向的 toast
+```
 
 **没做到的**：Electron 的 `contextIsolation` 隔离世界**没有等价物**。这是真实的安全面扩大，不是可以靠配置补回来的。唯一的缓解就是上面那张表 —— 加新命令前必须先填这张表。
 
@@ -120,10 +151,20 @@ pi-web **0.9.1 新增了 `POST /api/web-auth`**（0.9.0 没有），用口令换
 ```
 PAGE  origin=http://127.0.0.1:35566  tauri=true  piDesktop=function  cookie=true
 API   /api/sessions -> 200
-DOM   children=8  text=Pi 新建 ~\AppData\...
+DOM   children=8  text=Pi 新建 选择项目… 模型 技能 设置 开始使用 …
 ```
 
 即：cookie 生效、鉴权后的 API 返回 200、渲染的是**真正的 pi-web 界面**而不是登录页。
+
+**SSE 也一并验证过**（同一套探针，拿一个真实会话去连 `/api/agent/<id>/events`）：
+
+```
+SSE open after 348ms
+SSE msg#1 at +1788ms data={"type":"connected","sessionId":"01a0ad35-…","isStreaming":false
+SSE after 8s: readyState=1 opened=true msgs=1   ← readyState 1 = 仍在流
+```
+
+三个点都成立：**连得上**（cookie 鉴权在 EventSource 上同样生效）、**消息是增量到达的**（open 之后 1.4 秒才来，不是流结束时一次性给）、**流一直开着**（8 秒后仍是 `readyState=1`）。这正是自定义协议方案做不到的那件事。
 
 ### 明确写出来的降级
 
@@ -154,10 +195,29 @@ job.assign_process(child.as_raw_handle() as isize)?;
 
 **两者都保留**：正常退出仍然显式 `taskkill /pid <pid> /t /f`，因为换运行时要求文件句柄**立刻**释放、下次启动要求端口**立刻**可用；job 是崩溃/强杀时的兜底。
 
-**实测**：
+**实测**（先用 WMI 父子关系枚举整棵树，再强杀外壳，最后逐个 pid 查存活）：
 
-- 日志每次都是 `job object: created with KILL_ON_JOB_CLOSE` + `job object: assigned pid <n>`；
-- 用 `Stop-Process -Force`（等价于任务管理器「结束任务」，`TerminateProcess`，不跑任何退出处理）杀掉外壳后，被 assign 的 `node.exe` 与它的 next 孙进程**在进程列表中一并消失**。
+杀之前，外壳底下挂着 **15 个进程、最深 6 层**：
+
+```
+pi-web-tauri.exe (26160)
+├── msedgewebview2.exe ×6                    ← WebView2 自己的进程组
+└── node.exe (31180)                         ← 我们 spawn 的 bin/pi-web.js
+    ├── conhost.exe
+    └── node.exe (8128)                      ← next 孙进程
+        ├── node.exe (2956)
+        └── uvx.exe → uv.exe → mcp-server-tapd.exe → python.exe → python.exe
+                                              ← 智能体拉起来的 MCP server 链
+```
+
+用 `Stop-Process -Force`（`TerminateProcess`，等价于任务管理器「结束任务」，**不跑任何退出处理**）杀掉外壳后：
+
+```
+--- survivors AFTER ---
+NONE — every descendant was reclaimed
+```
+
+包括六层之下的 MCP server 和它的 python 子进程。这比 Electron 版的 `taskkill /T` 严格 —— 后者根本不会在强杀场景下被执行。
 
 ---
 
@@ -250,7 +310,8 @@ Rust 侧（`guard.rs`）只做三件事：拼命令行、解析那一行 JSON、
 
 | 项 | Electron | Tauri | 说明 |
 |---|---|---|---|
-| `autoHideMenuBar` | 菜单默认隐藏，按 Alt 唤出 | **菜单常驻可见** | Tauri 有 `hide_menu()/show_menu()`，但没有能把 Alt 按键接回来的途径。**未达成**，纯观感差异 |
+| `autoHideMenuBar` | 菜单默认隐藏，按 Alt 唤出 | **菜单常驻可见** | Tauri 有 `hide_menu()/show_menu()`，但没有能把 Alt 按键接回来的途径。**未达成**，纯观感差异。菜单加了 `&` 助记符（`Alt+A` / `Alt+E` / `Alt+V`），Electron 版原本没有 |
+| `reloadIgnoringCache()` | 重载并绕过 HTTP 缓存 | **普通重载** | Tauri 没有绕缓存的变体。**未完全达成**：普通重载仍然会重新校验顶层文档（Chromium 用户重载会发 `Cache-Control: max-age=0`），且 Next.js 的静态资源走内容哈希 URL，所以缺口很窄 —— 但它确实不是原来的语义 |
 | `app.setAppUserModelId()` | 显式调用 | 依赖打包身份 | Tauri 未暴露安全绑定，Win32 调用需要 `unsafe`。打包版由 NSIS 快捷方式与 bundle identity 保证；**仅 `tauri dev` 下任务栏分组身份缺失**，不影响发布产物 |
 | 视图菜单的缩放项 | `resetZoom`/`zoomIn`/`zoomOut` | 只留全屏 | Tauri 的 `PredefinedMenuItem` 没有缩放项；页面内 Ctrl+ +/- 仍可用 |
 | 服务崩溃弹窗 | `dialog.showErrorBox` | `tauri-plugin-dialog` | 行为一致（退出/重启/更新导致的停止一律不弹） |
@@ -264,13 +325,22 @@ Rust 侧（`guard.rs`）只做三件事：拼命令行、解析那一行 JSON、
 
 | # | 验收项 | 状态 |
 |---|---|---|
-| 1 | `tauri dev` 能起来，pi-web 正常加载，能建会话、能对话 | ⬜ 见下方「未完成的验证」 |
-| 2 | SSE 流式输出正常 | ⬜ 见下方 |
-| 3 | 关窗 / **强杀外壳**后 node 与 next 子孙进程全部消失 | ✅ 强杀实测通过（坑 5） |
-| 4 | 重启后主题 / 未读 / 隐藏目录等偏好保持不变 | ⬜ 见下方 |
-| 5 | 目录选择器弹原生对话框并回传路径 | ⬜ 见下方 |
-| 6 | 「检查更新」走通：查版本 → 安装 → 服务重启 → 页面刷新 | ✅ 自动静默更新端到端实测通过：`0.9.0 → 0.9.1`，staging 安装 → 校验 → 原子换入 → 复用同一端口重启。**交互式弹窗路径待测** |
+| 1 | `tauri dev` 能起来，pi-web 正常加载 | ✅ 页面渲染的是真实 pi-web 界面（「新建 / 选择项目… / 模型 / 技能 / 设置」），鉴权后的 `/api/sessions` 返回 200，会话列表读到 14 个已有会话。**「能对话」需要模型 API Key，本机没有配，这一条见下方「未完成的验证」** |
+| 2 | SSE 流式输出正常 | ✅ 真实会话的 `/api/agent/<id>/events`：348ms 打开，+1788ms 收到第一条消息（**增量到达**，不是流结束时一次性给），8 秒后 `readyState=1` **仍在流**。终端面板走同一套 SSE 端点 |
+| 3 | 关窗 / **强杀外壳**后 node 与 next 子孙进程全部消失 | ✅ 15 个进程、6 层深的整棵树（含 MCP server 与其 python 子进程），`TerminateProcess` 后**无一存活** |
+| 4 | 重启后主题 / 未读 / 隐藏目录等偏好保持不变 | ✅ `localStorage` 标记跨「强杀 + 重启」读回；端口全程复用 35566 |
+| 5 | 目录选择器弹原生对话框并回传路径 | ✅ 取消分支返回 `null`，确定分支返回 `"D:\\variFlight_work\\pi-web-tauri"`，两条都端到端到达页面 |
+| 6 | 「检查更新」走通：查版本 → 安装 → 服务重启 → 页面刷新 | ✅ 自动静默更新端到端：`0.9.0 → 0.9.1`，staging 安装 → 校验 → 原子换入 → 复用同一端口重启 → 页面刷新。结果 toast 也实测渲染（`已是最新版本 · pi-web 0.9.1 · pi-coding-agent 0.85.1`）。**交互式菜单项的确认弹窗未点过，见下方** |
 | 7 | 能打出 NSIS 安装包并在干净目录安装运行 | ⬜ 见下方 |
-| 8 | 全程无 `unsafe` | ✅ |
+| 8 | 全程无 `unsafe` | ✅ `grep -rn "unsafe" src-tauri/src` 为空 |
 
-> 本表在交付前会按实测结果更新；任何仍是 ⬜ 的项都会在这里写明原因，不会悄悄标成通过。
+附带：`npm run test:guard`（从 Electron 版原样搬来的运行时守卫回归测试）**69 passed, 0 failed**。
+
+## 未完成的验证
+
+明确列出来，不当作通过：
+
+1. **真实对话的逐字输出**（验收 1 的后半句）。本机 `~/.pi/agent` 里没有配模型提供商的 API Key，没法真的发一轮对话。已验证的是它下面那层：SSE 端点连得上、消息增量到达、流持续打开 —— 也就是 Electron 版必须靠 FD 3/4 管道才能做到、而 WebView2 自定义协议做不到的那件事。补验只需在应用里配一个 Key 然后发一句话。
+2. **交互式「检查更新…」菜单项**。菜单是原生菜单栏，脚本点不动（`SetForegroundWindow` 在后台进程里会被前台锁静默拒绝）。已验证的是它调用的整条链路：`check_for_updates` → `guard.latest()` → `notify_update` → `eval` → toast 渲染（自动检查走的是同一条，只差一个确认弹窗）。
+3. **只读目录安装的首启复制路径**（装到 `C:\Program Files` 时 robocopy 种子到 `%APPDATA%\Pi\runtime`）。默认安装目录是可写的 `%LOCALAPPDATA%\Pi`，没有走到这条分支。代码与 Electron 版同构，但**没有实测过**。
+4. **老版本迁移的实机验证**。本机 `%APPDATA%\Pi\.migrated-user-data` 是 Electron 版早就写下的，所以状态文件迁移正确地**跳过**了；`adopt_legacy_runtime()` 也因为本机是就地运行而没有触发。两条路径都没有在真实的「老用户升级」场景下跑过。

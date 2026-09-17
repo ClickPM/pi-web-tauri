@@ -80,12 +80,12 @@ impl Paths {
     }
 
     /// The shipped `@agegr/pi-web` production install.
+    ///
+    /// The only path that lands in the same place in both modes: the repo keeps
+    /// it at `runtime-seed/`, and `bundle.resources` maps it to `runtime-seed`
+    /// under the resource dir.
     pub fn seed_dir(&self) -> PathBuf {
-        if self.dev {
-            self.base.join("runtime-seed")
-        } else {
-            self.base.join("runtime-seed")
-        }
+        self.base.join("runtime-seed")
     }
 
     /// runtime-guard.js / updater.js / guard-cli.js.

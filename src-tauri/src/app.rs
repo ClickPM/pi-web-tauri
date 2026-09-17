@@ -55,8 +55,9 @@ pub struct AppState {
     pub paths: Paths,
     pub job: ProcessJob,
     server: Mutex<Option<Arc<Server>>>,
-    /// Base URL of the bundled status pages, captured once at window creation
-    /// (Windows serves them from http://tauri.localhost/).
+    /// Base URL of the bundled status pages. Captured rather than hardcoded
+    /// because it differs between modes: `tauri dev` serves them from
+    /// http://127.0.0.1:1430/, a packaged build from http://tauri.localhost/.
     local_base: Mutex<Option<url::Url>>,
 
     /// EVERY path that mutates the runtime tree goes through this gate. Two of
@@ -77,7 +78,6 @@ pub struct AppState {
     password_disabled: AtomicBool,
 
     pending_notice: Mutex<Option<Notice>>,
-    last_known_latest: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -94,7 +94,6 @@ impl AppState {
             stopping_for_update: AtomicBool::new(false),
             password_disabled: AtomicBool::new(false),
             pending_notice: Mutex::new(None),
-            last_known_latest: Mutex::new(None),
         }
     }
 
@@ -239,7 +238,7 @@ fn json_string(s: &str) -> String {
 /// Push npm's progress into the updating/healing page.
 fn show_progress(app: &AppHandle, text: &str) {
     if let Some(win) = main_window(app) {
-        let _ = win.eval(&format!(
+        let _ = win.eval(format!(
             "window.__piwdProgress&&window.__piwdProgress({})",
             json_string(text)
         ));
@@ -256,25 +255,33 @@ fn show_progress(app: &AppHandle, text: &str) {
 /// afterwards so pi-web's own auth check re-runs with the cookie present —
 /// without that it has already decided it is logged out and rendered its login
 /// form. The reload fires another page-load, which the flag stops from looping.
-pub fn inject_session_cookie(app: &AppHandle) {
+/// Returns true when it reloaded the page, so the caller knows this page is
+/// about to be replaced and must not deliver anything to it yet.
+pub fn inject_session_cookie(app: &AppHandle) -> bool {
     let state = app.state::<AppState>();
-    let Some(server) = state.server() else { return };
-    let Some(win) = main_window(app) else { return };
+    let Some(server) = state.server() else {
+        return false;
+    };
+    let Some(win) = main_window(app) else {
+        return false;
+    };
 
     let on_pi_web = win
         .url()
         .map(|u| u.as_str().starts_with(&server.origin()))
         .unwrap_or(false);
     if !on_pi_web {
-        return;
+        return false;
     }
-    let Some(cookie) = server.session_cookie() else { return };
+    let Some(cookie) = server.session_cookie() else {
+        return false;
+    };
     if server
         .auth_injected
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return;
+        return false;
     }
 
     // `path=/` and no expiry: a session cookie for this origin, exactly as the
@@ -284,8 +291,14 @@ pub fn inject_session_cookie(app: &AppHandle) {
         json_string(&cookie)
     );
     match win.eval(&script) {
-        Ok(()) => log_dbg!("session cookie installed in the webview"),
-        Err(e) => log_dbg!("could not install the session cookie: {e}"),
+        Ok(()) => {
+            log_dbg!("session cookie installed in the webview; reloading");
+            true
+        }
+        Err(e) => {
+            log_dbg!("could not install the session cookie: {e}");
+            false
+        }
     }
 }
 
@@ -301,6 +314,14 @@ pub fn flush_update_notice(app: &AppHandle) {
         .map(|u| u.as_str().starts_with(&server.origin()))
         .unwrap_or(false);
     if !on_pi_web {
+        let has_pending = state
+            .pending_notice
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some();
+        if has_pending {
+            log_dbg!("update notice held — the window is not on a pi-web page yet");
+        }
         return;
     }
 
@@ -310,8 +331,9 @@ pub fn flush_update_notice(app: &AppHandle) {
     };
     let Some(notice) = notice else { return };
     let payload = serde_json::to_string(&notice).unwrap_or_else(|_| "null".into());
-    if let Err(e) = win.eval(&format!("window.__piwdNotice&&window.__piwdNotice({payload})")) {
-        log_dbg!("flush_update_notice failed: {e}");
+    match win.eval(format!("window.__piwdNotice&&window.__piwdNotice({payload})")) {
+        Ok(()) => log_dbg!("update notice delivered: {} / {}", notice.status, notice.title),
+        Err(e) => log_dbg!("update notice delivery FAILED: {e}"),
     }
 }
 
@@ -506,7 +528,20 @@ pub fn start_or_restart_server(app: &AppHandle) -> Result<(), String> {
             password,
             move |code, tail| on_server_exit(&crash_app, code, tail),
         )?;
-        server.wait_ready(Duration::from_secs(90))?;
+
+        // From here the child is running but is not yet owned by AppState, so
+        // every failure path has to stop it by hand. Leaving it alive would keep
+        // the port bound, and the next attempt would have to pick a different
+        // one — which resets every pi-web preference (坑 1). The job object only
+        // catches this when the whole shell exits, which is far too late.
+        let started = |e: String, server: Server| -> String {
+            server.stop();
+            e
+        };
+
+        if let Err(e) = server.wait_ready(Duration::from_secs(90)) {
+            return Err(started(e, server));
+        }
 
         // Trade the password for a session cookie BEFORE the webview ever sees
         // the origin, so the only secret that reaches the page is the token.
@@ -520,7 +555,7 @@ pub fn start_or_restart_server(app: &AppHandle) -> Result<(), String> {
             Ok(None) => log_dbg!("no password configured — nothing to authenticate"),
             Err(e) => {
                 log_dbg!("shell login FAILED ({e}) — restarting without a password");
-                return Err(LOGIN_FAILED.into());
+                return Err(started(LOGIN_FAILED.into(), server));
             }
         }
 
@@ -625,12 +660,13 @@ pub fn check_for_updates(app: &AppHandle, interactive: bool) {
         }
     };
 
-    {
-        let mut last = state.last_known_latest.lock().unwrap_or_else(|e| e.into_inner());
-        *last = Some(latest.latest.clone());
-    }
-
     let installed = latest.installed.clone().unwrap_or_else(|| "未知".into());
+    log_dbg!(
+        "update check ({}): installed={installed} latest={} newer={}",
+        if interactive { "manual" } else { "auto" },
+        latest.latest,
+        latest.newer
+    );
     if !latest.newer {
         notify_update(
             app,

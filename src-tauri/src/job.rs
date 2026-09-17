@@ -43,7 +43,7 @@ impl ProcessJob {
         let mut info = ExtendedLimitInfo::new();
         info.limit_kill_on_job_close();
 
-        match Job::create_with_limit_info(&mut info) {
+        match Job::create_with_limit_info(&info) {
             Ok(job) => {
                 crate::log::dbg("job object: created with KILL_ON_JOB_CLOSE");
                 Self { job: Some(job) }

@@ -14,7 +14,10 @@ pub const ID_RESTART_SERVER: &str = "restart-server";
 pub const ID_DEVTOOLS: &str = "devtools";
 
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let app_menu = SubmenuBuilder::new(app, "App")
+    // `&` marks the Alt mnemonic. Electron's menus had these; muda needs them
+    // spelled out. Latin letters rather than the Chinese labels, because that
+    // is what Alt+<key> can actually reach.
+    let app_menu = SubmenuBuilder::new(app, "&App")
         .item(
             &MenuItemBuilder::with_id(ID_CHECK_UPDATES, "检查更新…").build(app)?,
         )
@@ -34,7 +37,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&PredefinedMenuItem::quit(app, Some("退出"))?)
         .build()?;
 
-    let edit_menu = SubmenuBuilder::new(app, "编辑")
+    let edit_menu = SubmenuBuilder::new(app, "编辑(&E)")
         .item(&PredefinedMenuItem::undo(app, Some("撤销"))?)
         .item(&PredefinedMenuItem::redo(app, Some("重做"))?)
         .separator()
@@ -44,7 +47,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .item(&PredefinedMenuItem::select_all(app, Some("全选"))?)
         .build()?;
 
-    let view_menu = SubmenuBuilder::new(app, "视图")
+    let view_menu = SubmenuBuilder::new(app, "视图(&V)")
         .item(&PredefinedMenuItem::fullscreen(app, Some("全屏"))?)
         .build()?;
 
@@ -61,7 +64,7 @@ pub fn handle(app: &AppHandle, id: &str) {
         }
         ID_RELOAD => {
             if let Some(win) = crate::app::main_window(app) {
-                let _ = win.eval("location.reload(true)");
+                let _ = win.reload();
             }
         }
         ID_RESTART_SERVER => {

@@ -1,10 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Local shell pages (loading / updating / healing / error). These are ours, so they get the small set of core permissions the shell itself needs.",
+  "description": "The shell's own pages (loading / updating / healing / error). They are driven entirely from Rust through webview.eval() and never call a command, so they are granted no app commands at all — declaring the app manifest in build.rs means even local pages must be granted each command by name, and these need none.",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "dialog:default"
-  ]
+  "permissions": ["core:default"]
 }

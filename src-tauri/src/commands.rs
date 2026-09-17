@@ -28,12 +28,14 @@ use crate::log_dbg;
 #[tauri::command]
 pub async fn select_directory(window: WebviewWindow) -> Result<Option<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
+    log_dbg!("select_directory: opening folder dialog");
     window
         .dialog()
         .file()
         .set_title("选择工作目录")
         .set_parent(&window)
         .pick_folder(move |picked| {
+            log_dbg!("select_directory: dialog callback fired ({picked:?})");
             let _ = tx.send(picked);
         });
 
@@ -42,16 +44,23 @@ pub async fn select_directory(window: WebviewWindow) -> Result<Option<String>, S
         .await
         .map_err(|e| format!("directory picker failed: {e}"))?;
 
-    Ok(picked.map(|p| p.to_string()))
+    let result = picked.map(|p| p.to_string());
+    log_dbg!("select_directory: returning {result:?}");
+    Ok(result)
 }
 
 /// Backend for the injected bottom bar's reload button. Same effect as the
-/// menu's 重新加载 (Ctrl+R), reachable without the menu. Driven from the shell
-/// rather than `location.reload()` so it ignores the HTTP cache — after an
-/// embedded-server restart the page must not come back from a stale cache.
+/// menu's 重新加载 (Ctrl+R), reachable without unhiding the menu.
+///
+/// Electron used `reloadIgnoringCache()` here, because after an embedded-server
+/// restart the page must not come back from a stale cache. Tauri has no
+/// cache-ignoring variant, so this is an ordinary reload — which still
+/// revalidates the top-level document (Chromium sends `Cache-Control: max-age=0`
+/// for a user reload), and Next.js serves its assets under content-hashed URLs,
+/// so the gap is narrow. Recorded in PORTING.md rather than papered over.
 #[tauri::command]
 pub fn reload_page(window: WebviewWindow) -> Result<(), String> {
-    window.eval("location.reload(true)").map_err(|e| {
+    window.reload().map_err(|e| {
         log_dbg!("reload-page error {e}");
         e.to_string()
     })

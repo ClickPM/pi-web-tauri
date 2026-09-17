@@ -86,11 +86,18 @@ pub fn run() {
                     handle.state::<AppState>().capture_local_base(payload.url());
                     // First load of the pi-web origin: hand the page the session
                     // cookie the shell already obtained, then let it reload.
-                    app::inject_session_cookie(handle);
-                    // Deliver any update-result CTA queued while the page was
-                    // (re)loading — e.g. the "更新完成" notice set right after
-                    // an update reloads the server.
-                    app::flush_update_notice(handle);
+                    //
+                    // When that reload IS happening, the CTA has to wait for it.
+                    // Delivering into a page that is about to be replaced looked
+                    // fine in the logs ("update notice delivered") while the
+                    // user saw nothing — and the one notice that lands in this
+                    // exact window is "更新完成", i.e. the one they most need.
+                    if !app::inject_session_cookie(handle) {
+                        // Deliver any update-result CTA queued while the page was
+                        // (re)loading — e.g. the "更新完成" notice set right after
+                        // an update reloads the server.
+                        app::flush_update_notice(handle);
+                    }
                 }
             });
             if let Some(theme) = restored {
