@@ -1,0 +1,12 @@
+# Build inputs — large, reproducible (npm run seed / npm run seed:node)
+/vendor/
+/runtime-seed/
+
+# Build output
+/src-tauri/target/
+/src-tauri/gen/
+node_modules/
+
+# Local editor/OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,21 @@
+{
+  "name": "pi-web-tauri",
+  "productName": "Pi",
+  "version": "0.4.0",
+  "description": "Standalone desktop shell for pi-web (Tauri 2 + Rust). Bundles a Node runtime and the @agegr/pi-web server behind a native WebView2 window.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:dir": "tauri build --no-bundle",
+    "seed": "cd runtime-seed && npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com",
+    "seed:node": "powershell -ExecutionPolicy Bypass -File scripts/seed-node.ps1",
+    "icons": "node build/_make_icons.js",
+    "test:guard": "node scripts/test-runtime-guard.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.9.0"
+  }
+}

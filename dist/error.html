@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Marks this as one of the shell's OWN pages. The injected script keys
+         its pi-web-only grafts off this rather than off the origin, which
+         differs between dev and packaged builds. -->
+    <meta name="piwd-shell" content="1" />
+    <title>Pi Agent — 启动失败</title>
+    <style>
+      /* Metro live-tile shell chrome — near-black canvas, WP red (#E51400) for
+         the error, flat square log panel with a left accent bar. */
+      :root {
+        --bg: #0A0A0A;
+        --bg-panel: #141414;
+        --text: #FFFFFF;
+        --text-muted: #A6A6A6;
+        --grid: rgba(255, 255, 255, 0.06);
+        --accent: #2F6BFF;
+        --red: #E51400;
+      }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", Selawik, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+      .wrap { max-width: 720px; margin: 0 auto; padding: 56px 32px; }
+      h1 { font-size: 24px; font-weight: 300; letter-spacing: 0.4px; color: var(--red); margin: 0 0 18px; }
+      p { font-size: 13.5px; line-height: 1.7; color: var(--text-muted); }
+      pre {
+        background: var(--bg-panel);
+        border: 1px solid var(--grid);
+        border-left: 3px solid var(--red);
+        border-radius: 0;
+        padding: 14px 16px;
+        font-size: 12px;
+        color: var(--text-muted);
+        font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
+        overflow: auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 360px;
+      }
+      code { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Pi Agent 启动失败</h1>
+      <p>本地服务未能正常启动。常见原因：未安装 Node.js，或运行时尚未就绪。</p>
+      <p id="msg"></p>
+      <pre id="log"></pre>
+    </div>
+    <script>
+      window.__setError = function (msg, log) {
+        document.getElementById("msg").textContent = "错误：" + (msg || "未知错误");
+        document.getElementById("log").textContent = log || "(无日志输出)";
+      };
+    </script>
+  </body>
+</html>

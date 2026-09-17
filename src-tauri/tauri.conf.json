@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Pi",
+  "version": "0.4.0",
+  "identifier": "com.agegr.piwebdesktop",
+  "build": {
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [],
+    "security": {
+      "csp": null,
+      "dangerousDisableAssetCspModification": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "copyright": "Copyright © 2026",
+    "category": "DeveloperTool",
+    "shortDescription": "Pi — pi-web desktop",
+    "longDescription": "Standalone desktop shell for pi-web. Bundles a Node.js runtime and the @agegr/pi-web server; nothing needs to be pre-installed on the target machine.",
+    "resources": {
+      "../vendor/node": "node",
+      "../runtime-seed": "runtime-seed",
+      "resources/guard": "guard"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "installerHooks": "nsis/hooks.nsh"
+      }
+    }
+  }
+}

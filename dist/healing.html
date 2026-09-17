@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Marks this as one of the shell's OWN pages. The injected script keys
+         its pi-web-only grafts off this rather than off the origin, which
+         differs between dev and packaged builds. -->
+    <meta name="piwd-shell" content="1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+    <title>Pi Agent — 修复中</title>
+    <style>
+      /* Metro live-tile shell chrome — see loading.html for token rationale.
+         Amber accent (rather than updating.html's blue) so a repair reads as a
+         different event from a routine update at a glance. */
+      :root {
+        --bg: #0A0A0A;
+        --text: #FFFFFF;
+        --text-dim: #6A6A6A;
+        --accent: #E3A21A;
+      }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Segoe UI", Selawik, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+      .wrap {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 28px;
+        padding: 0 40px;
+        text-align: center;
+      }
+      .dots { display: flex; gap: 9px; }
+      .dots span {
+        width: 9px;
+        height: 9px;
+        background: var(--accent);
+        animation: dotPulse 1.2s ease-in-out infinite;
+      }
+      .dots span:nth-child(2) { animation-delay: 0.15s; }
+      .dots span:nth-child(3) { animation-delay: 0.30s; }
+      .dots span:nth-child(4) { animation-delay: 0.45s; }
+      .dots span:nth-child(5) { animation-delay: 0.60s; }
+      @keyframes dotPulse {
+        0%, 100% { opacity: 0.25; transform: scale(0.7); }
+        50%      { opacity: 1;    transform: scale(1); }
+      }
+      .title { font-size: 26px; font-weight: 300; letter-spacing: 0.5px; }
+      .sub { font-size: 12.5px; color: var(--text-dim); letter-spacing: 0.2px; line-height: 1.7; }
+      @media (prefers-reduced-motion: reduce) {
+        .dots span { animation: none; opacity: 0.7; }
+      }
+      /* npm progress, fed by the Rust side through webview.eval(). Reserved
+         height so the layout does not jump when the first line arrives. */
+      .progress {
+        min-height: 16px;
+        max-width: 640px;
+        font-size: 11.5px;
+        color: var(--text-dim);
+        font-family: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        direction: rtl;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="dots"><span></span><span></span><span></span><span></span><span></span></div>
+      <div class="title">正在修复运行时…</div>
+      <div class="sub">
+        检测到运行时文件不完整（通常是上次更新被中断），正在重新下载安装。<br />
+        当前版本不会被改变，请保持网络连接并勿关闭窗口。
+      </div>
+      <div class="progress" id="piwd-progress"></div>
+    </div>
+    <script>
+      window.__piwdProgress = function (text) {
+        var el = document.getElementById("piwd-progress");
+        if (el) el.textContent = String(text || "");
+      };
+    </script>
+  </body>
+</html>

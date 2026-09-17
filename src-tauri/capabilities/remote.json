@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote-pi-web",
+  "description": "The embedded pi-web origin. WITHOUT this capability a remote http:// page gets no working __TAURI_INTERNALS__.invoke at all, and the directory picker, theme sync and update CTA all silently die (see PORTING.md, 坑 2).\n\nThe permission list is deliberately EMPTY of core/plugin entries: pi-web renders agent-produced content in the same world as our injection script, so nothing the ACL can grant is worth the injection surface. The only things this origin can reach are the four app commands in commands.rs — every one of them parameterless or a single validated string, and each one's worst case is a native dialog, a page reload, or an npm install of one fixed package from one fixed registry. Rust->page traffic goes the other way, through webview.eval(), which needs no permission here at all.",
+  "remote": {
+    "urls": ["http://127.0.0.1:*"]
+  },
+  "windows": ["main"],
+  "permissions": []
+}
