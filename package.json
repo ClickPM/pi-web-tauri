@@ -10,7 +10,7 @@
     "dev": "tauri dev",
     "build": "tauri build",
     "build:dir": "tauri build --no-bundle",
-    "seed": "cd runtime-seed && npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com",
+    "seed": "node scripts/seed-runtime.js",
     "seed:node": "powershell -ExecutionPolicy Bypass -File scripts/seed-node.ps1",
     "icons": "node build/_make_icons.js",
     "test:guard": "node scripts/test-runtime-guard.js",

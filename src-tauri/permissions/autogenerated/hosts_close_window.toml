@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hosts-close-window"
+description = "Enables the hosts_close_window command without any pre-configured scope."
+commands.allow = ["hosts_close_window"]
+
+[[permission]]
+identifier = "deny-hosts-close-window"
+description = "Denies the hosts_close_window command without any pre-configured scope."
+commands.deny = ["hosts_close_window"]

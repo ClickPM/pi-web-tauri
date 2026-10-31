@@ -12,9 +12,18 @@ fn main() {
     // out exactly these three.
     let attributes = tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            // Main window / pi-web surface (capabilities/remote.json):
             "select_directory",
             "theme_changed",
             "apply_update",
+            // Local-only Host Manager window surface (capabilities/hosts-manager.json):
+            "hosts_get_state",
+            "hosts_suggest_port",
+            "hosts_check_env",
+            "hosts_test_connection",
+            "hosts_save",
+            "hosts_open_dir",
+            "hosts_close_window",
         ]),
     );
     tauri_build::try_build(attributes).expect("failed to run tauri-build");

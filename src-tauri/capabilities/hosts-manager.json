@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "hosts-manager",
+  "description": "Local-only Host Manager window (dist/hosts.html). Granted strictly to the hosts-manager window with NO remote.urls, so neither the embedded pi-web page nor any tunnelled 127.0.0.1 origin in the main window can invoke any host configuration or connection-probe command.",
+  "windows": ["hosts-manager"],
+  "permissions": [
+    "allow-hosts-get-state",
+    "allow-hosts-suggest-port",
+    "allow-hosts-check-env",
+    "allow-hosts-test-connection",
+    "allow-hosts-save",
+    "allow-hosts-open-dir",
+    "allow-hosts-close-window"
+  ]
+}

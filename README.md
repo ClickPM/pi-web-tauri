@@ -20,26 +20,28 @@
 
 ```
 pi-web-tauri/
-├── dist/                       # 外壳自己的状态页（Tauri 的 frontendDist，无打包器）
+├── dist/                       # 外壳自己的状态页与配置页（Tauri 的 frontendDist，无打包器）
 │   ├── index.html              #   启动中（窗口第一帧）
 │   ├── updating.html           #   更新中（带 npm 进度行）
 │   ├── healing.html            #   修复运行时中（带 npm 进度行）
-│   └── error.html              #   启动失败（带服务日志）
+│   ├── error.html              #   启动失败（带服务日志）
+│   └── hosts.html              #   远程主机管理器（独立窗口 hosts-manager 专用）
 ├── src-tauri/
 │   ├── src/
 │   │   ├── main.rs             # 入口
 │   │   ├── lib.rs              # 插件/窗口/菜单/注入脚本装配
 │   │   ├── app.rs              # 启动与更新状态机、运行时锁、CTA 投递
 │   │   ├── server.rs           # 端口持久化、起 pi-web、等就绪、停服务
-│   │   ├── hosts.rs            # %APPDATA%\Pi\hosts.json 解析/校验/写回 active
-│   │   ├── remote.rs           # 远端主机：SSH 本地端口转发 + 就绪探测 + 换 cookie
+│   │   ├── hosts.rs            # %APPDATA%\Pi\hosts.json 解析/校验/原子保存与 ~/.ssh/config 别名提取
+│   │   ├── hosts_ui.rs         # hosts-manager 独立窗口与 7 个主机管理/探活命令（主窗口不可调）
+│   │   ├── remote.rs           # 远端主机：SSH 本地端口转发 + 就绪探测 + 换 cookie + 三步连接诊断
 │   │   ├── guard.rs            # 驱动 guard-cli.js（不含任何完整性逻辑）
 │   │   ├── job.rs              # Job Object（win32job，安全封装）
 │   │   ├── paths.rs            # 运行时/资源/userData 路径解析
 │   │   ├── migrate.rs          # 老 userData 与老运行时回退目录的一次性收养
 │   │   ├── theme.rs            # theme-state.json ↔ 窗口主题
-│   │   ├── commands.rs         # 页面能调的全部 3 个命令
-│   │   ├── menu.rs             # 应用菜单（常显；「主机」切换器；末尾是「刷新」按钮）
+│   │   ├── commands.rs         # pi-web 页面能调的全部 3 个命令
+│   │   ├── menu.rs             # 应用菜单（常显；「主机」切换器与管理器入口；末尾是「刷新」按钮）
 │   │   └── log.rs              # %TEMP%/pi-web-desktop-debug.log
 │   ├── inject/preload.js       # 注入页面的自定义 UI（Electron preload.js 的移植）
 │   ├── resources/guard/
@@ -47,18 +49,20 @@ pi-web-tauri/
 │   │   ├── updater.js          # ★ 同上
 │   │   └── guard-cli.js        # 唯一的新胶水：把上面两个包成 JSON CLI
 │   ├── capabilities/
-│   │   ├── default.json        #   本地状态页（不给任何命令）
-│   │   └── remote.json         #   http://127.0.0.1:* + 逐个 allow 的 3 个命令
+│   │   ├── default.json        #   主窗口本地状态页（不给任何应用命令）
+│   │   ├── remote.json         #   主窗口 http://127.0.0.1:* + 逐个 allow 的 3 个命令
+│   │   └── hosts-manager.json  #   仅 hosts-manager 本地窗口可调的 7 个主机管理命令（无 remote.urls）
 │   ├── nsis/hooks.nsh          # 安装器钩子：检测并卸载 Electron 旧版
-│   ├── build.rs                # 声明 3 个命令 → 生成 allow-* 权限（必需，见 PORTING 坑 2）
+│   ├── build.rs                # 声明应用命令 → 生成按窗口隔离的 allow-* 权限（必需，见 PORTING 坑 2）
 │   ├── icons/                  # tauri icon 生成的全套图标
 │   └── tauri.conf.json
 ├── vendor/node/                # 内置 Node.js 运行时 → resources/node        ← 构建输入
 ├── runtime-seed/               # @agegr/pi-web 的 npm 生产安装 → resources/runtime-seed ← 构建输入
 ├── scripts/
 │   ├── seed-node.ps1           # 供给 vendor/node（从 Electron 版原样复用）
+│   ├── seed-runtime.js         # 供给/更新 runtime-seed 至上游最新 @agegr/pi-web（npm run seed）
 │   ├── test-runtime-guard.js   # 运行时守卫回归测试（npm run test:guard）
-│   ├── prune-seed.js           # 打包前删掉 runtime-seed 里的 .map（约 157MB）
+│   ├── prune-seed.js           # 打包前删掉 runtime-seed 里的 .map
 │   └── remote/                 # 远端常驻模板：systemd --user / launchd / hosts.example.json
 ├── build/                      # 图标 SVG 源 + _make_icons.js
 └── PORTING.md                  # 每个坑的实测结论、未达成项与已知降级
@@ -83,7 +87,7 @@ pi-web-tauri/
    <node>\node.exe  <runtime>\node_modules\@agegr\pi-web\bin\pi-web.js \
        -H 127.0.0.1 -p <port> --no-open
    ```
-   env：`NODE_ENV=production`、`PATH` 前置内置 node 目录、`PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT`、`PI_WEB_NO_OPEN=1`、`PI_WEB_PASSWORD=<每次启动随机、不落盘>`。子进程一出生就被塞进 Job Object。
+   env：`NODE_ENV=production`、`PATH` 前置内置 node 目录、`PI_SUBAGENTS_PI_CODING_AGENT_PACKAGE_ROOT`、`PI_WEB_NO_OPEN=1`、`PI_WEB_SKIP_VERSION_CHECK=1`（关闭网页端自身的全局 npm 更新检查，统一由外壳原子热更新托管）、`PI_WEB_APP_NAME=Pi`、`PI_WEB_PASSWORD=<每次启动随机、不落盘>`。子进程一出生就被塞进 Job Object。
 6. **等就绪**：stdout 的 `Ready` 行 + HTTP 探针，任一先到即可（401 也算就绪 —— 那正是带口令时的正确回答）。
 7. **换会话 cookie**：Rust 侧直接在 loopback 上 `POST /api/web-auth` 把口令换成 `pi_web_session` cookie。**口令自始至终不进页面**，页面只拿到那个 token。
 8. **导航**：窗口先显示 `index.html`，就绪后 navigate 到 `http://127.0.0.1:<port>/`（**不带内嵌凭据** —— 带了会让页面里所有相对路径 `fetch()` 直接抛异常，见 PORTING.md 坑 4），首帧加载完成时把 cookie 注入页面并重载一次。
@@ -103,15 +107,18 @@ pi-web-tauri/
    C:\Windows\System32\OpenSSH\ssh.exe mac  'echo ok'
    C:\Windows\System32\OpenSSH\ssh.exe 130  'echo ok'
    ```
-3. 复制模板并按需修改：
-   ```powershell
-   Copy-Item scripts\remote\hosts.example.json $env:APPDATA\Pi\hosts.json
-   ```
-4. 远端设了口令时，把口令放进**用户环境变量**（`passwordEnv` 指向它，优先于文件里的 `password`）：
+3. 在菜单 **`主机(&H) → 管理远程主机…`**（`Ctrl+Shift+H`）中可视化添加、排序、测试并保存远程主机（无需手改 JSON）：
+   - 自动提取 `%USERPROFILE%\.ssh\config` 中的非通配 `Host` 别名供点击/补全，也可直接填 `user@ip`；
+   - 新增主机自动从 `45000–48999` 分配当前未占用的最小本机端口，修改已有主机端口会给出 Origin 偏好重置提示；
+   - **一键「测试连接」**：非破坏性建立临时 OpenSSH 隧道（若目标端口正被当前激活会话占用，自动借用空闲端口探活并立即回收），分三步输出耗时与原因（`1. SSH 隧道建立` → `2. 远端 pi-web 响应` → `3. 口令鉴权验证`）；
+   - **口令最小暴露**：已存口令与环境变量值绝不回传前端（仅显示「环境变量 / 已设口令 / 无口令」状态与 `••••••••（保持不变）` 占位），未改口令框时保存自动保留原口令；
+   - 点击 **「保存并生效」** 原子写入 `%APPDATA%\Pi\hosts.json`（标准 UTF-8 无 BOM），顶部 `主机(&H)` 菜单立即热更新，正在连接的远端参数变更自动重连、被删平滑切回 `Windows 本地`。
+   - 也可按模板手动编辑 `%APPDATA%\Pi\hosts.json`（`Copy-Item scripts\remote\hosts.example.json $env:APPDATA\Pi\hosts.json`），改完点「主机 → 重新读取 hosts.json」。
+4. 远端设了口令时，推荐把口令放进**用户环境变量**（`passwordEnv` 指向它，优先于文件里的 `password`；管理界面会实时提示当前进程环境中该变量是否已生效）：
    ```powershell
    [Environment]::SetEnvironmentVariable('PI_WEB_REMOTE_PASSWORD_130', '<与远端 PI_WEB_PASSWORD 相同>', 'User')
    ```
-   改完环境变量需重启 Pi；改 `hosts.json` 只需菜单「主机 → 重新读取 hosts.json」。
+   改完系统用户环境变量需重启 Pi 使新进程继承。
 
 `hosts.json` 字段：
 
@@ -174,13 +181,11 @@ curl -sI http://127.0.0.1:30141/
 # 1. 外壳依赖（只有 Tauri CLI）
 npm install
 
-# 2. 运行时种子（@agegr/pi-web 生产安装，含预构建 .next）
-mkdir runtime-seed; cd runtime-seed; npm init -y
-npm install @agegr/pi-web@latest --omit=dev --registry=https://registry.npmmirror.com
-cd ..
-
-# 3. 内置 Node 运行时（win-x64）—— 全自动
+# 2. 内置 Node 运行时（win-x64）—— 全自动
 npm run seed:node
+
+# 3. 运行时种子（自动拉取上游最新 @agegr/pi-web 生产安装，含预构建 .next）
+npm run seed
 
 # 4. 图标（已入库，只有改了 SVG 才需要重跑）
 npm run icons
@@ -250,6 +255,8 @@ npm run build:dir   # 只编译不打包（调试更快）
 
 Electron preload 跑在**隔离世界**，`contextIsolation` 挡住了页面脚本。Tauri 的注入脚本跑在**页面主世界** —— 而 pi-web 页面里渲染的是智能体产出的内容。**这层隔离没有了。**
 
-所以 `src-tauri/src/commands.rs` 里只有 3 个命令，且两个不收参数、一个只收一个立刻收窄成 `dark|light` 的字符串。加新命令前先问：**如果这个命令被页面里一段恶意字符串调用，最坏会发生什么？** 答案必须是「弹个用户还得确认的对话框」这个量级。
+所以主窗口（`capabilities/remote.json`，覆盖本地或远端 `http://127.0.0.1:*`）暴露给 `pi-web` 页面的命令只有 `src-tauri/src/commands.rs` 里的 3 个，且两个不收参数、一个只收一个立刻收窄成 `dark|light` 的字符串。加新命令前先问：**如果这个命令被页面里一段恶意字符串调用，最坏会发生什么？** 答案必须是「弹个用户还得确认的对话框」这个量级。
+
+而应用内配置界面（如「管理远程主机」`hosts-manager` 窗口，加载打包静态页 `dist/hosts.html`，不注入 `preload.js`、不加载任何外部 URL）则走**窗口级 ACL 硬隔离**：在 `capabilities/hosts-manager.json` 中仅授权 `"windows": ["hosts-manager"]` 且不配 `remote.urls`。主窗口里的任何 `127.0.0.1:*` 页面调用 `hosts_*` 命令都会在进入 Rust 处理器前直接被 Tauri ACL 拦截拒绝。
 
 反方向（Rust → 页面）走 `webview.eval()`，**不需要任何 ACL 权限** —— 更新 toast、npm 进度行、会话 cookie 注入都没有在 capability 里留下口子。所以 `capabilities/remote.json` 的 `permissions` 里只有那 3 个 `allow-*`，没有任何 `core:*` / `plugin:*`；别往里加。

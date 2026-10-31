@@ -14,11 +14,26 @@
 //! two apart from `location.port` alone) and below the Windows ephemeral range
 //! (49152+, so the port is still free next launch).
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::log_dbg;
+
+/// Serialises every read-modify-write against `hosts.json` (`save_active` and
+/// `save_config`) within this process so concurrent calls can never clobber a
+/// newer file with an older snapshot or contend on the same temp file.
+static FILE_IO_LOCK: Mutex<()> = Mutex::new(());
+static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn unique_tmp_path(dir: &Path) -> PathBuf {
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("{HOSTS_FILE}.{}.{seq}.tmp", std::process::id()))
+}
 
 pub const HOSTS_FILE: &str = "hosts.json";
 pub const LOCAL_ID: &str = "local";
@@ -332,6 +347,7 @@ fn validate_host(
 ///
 /// Returns Ok(false) when there was nothing to do (no file, or already set).
 pub fn save_active(dir: &Path, id: &str) -> Result<bool, String> {
+    let _io = FILE_IO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = hosts_path(dir);
     let raw = match std::fs::read_to_string(&path) {
         Ok(t) => t,
@@ -363,7 +379,7 @@ pub fn save_active(dir: &Path, id: &str) -> Result<bool, String> {
         return Err("写回 active 的自检失败，已放弃".into());
     }
 
-    let tmp = dir.join(format!("{HOSTS_FILE}.tmp"));
+    let tmp = unique_tmp_path(dir);
     std::fs::write(&tmp, format!("{bom}{edited}"))
         .map_err(|e| format!("无法写入 {}：{e}", tmp.display()))?;
     // std's rename replaces an existing target on Windows (MOVEFILE_REPLACE_EXISTING).
@@ -500,6 +516,619 @@ fn value_end(bytes: &[u8], i: usize) -> Option<usize> {
             Some(j)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Host Manager UI types, SSH config alias helper & atomic config writer
+// ---------------------------------------------------------------------------
+
+/// Redacted view of one remote host handed to `hosts-manager`.
+///
+/// Carries neither the inline `password` nor the resolved value of
+/// `passwordEnv` — only `has_password` and `password_from_env` booleans plus
+/// the variable NAME so the form can edit it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostSummary {
+    pub id: String,
+    pub label: String,
+    pub ssh_target: String,
+    pub ssh_port: Option<u16>,
+    pub local_port: u16,
+    pub remote_host: String,
+    pub remote_port: u16,
+    pub password_env: Option<String>,
+    pub has_password: bool,
+    pub password_from_env: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostsUiSnapshot {
+    pub exists: bool,
+    pub active: String,
+    pub keep_local_running: bool,
+    pub hosts: Vec<HostSummary>,
+    pub warnings: Vec<String>,
+}
+
+/// How an edit submission wants the inline `password` field updated on disk.
+#[derive(Clone, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum PasswordUpdate {
+    /// Leave the existing inline `password` in `hosts.json` untouched.
+    Keep {
+        #[serde(default, rename = "fromId")]
+        from_id: Option<String>,
+    },
+    /// Set a new inline `password` (an empty string clears it).
+    Set { value: String },
+    /// Explicitly remove any inline `password`.
+    Clear,
+}
+
+impl std::fmt::Debug for PasswordUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keep { from_id } => f
+                .debug_struct("Keep")
+                .field("from_id", from_id)
+                .finish(),
+            Self::Set { value } => f
+                .debug_struct("Set")
+                .field("value", &if value.is_empty() { "<empty>" } else { "<redacted>" })
+                .finish(),
+            Self::Clear => f.write_str("Clear"),
+        }
+    }
+}
+
+/// One host submitted from the Host Manager form (for testing or saving).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostDraft {
+    pub id: String,
+    #[serde(default)]
+    pub original_id: Option<String>,
+    pub label: String,
+    pub ssh_target: String,
+    #[serde(default)]
+    pub ssh_port: Option<u16>,
+    pub local_port: u16,
+    #[serde(default)]
+    pub remote_host: Option<String>,
+    #[serde(default)]
+    pub remote_port: Option<u16>,
+    #[serde(default)]
+    pub password_env: Option<String>,
+    pub password: PasswordUpdate,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerializedHost {
+    id: String,
+    label: String,
+    ssh_target: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_port: Option<u16>,
+    local_port: u16,
+    remote_host: String,
+    remote_port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SerializedHostsFile {
+    active: String,
+    keep_local_running: bool,
+    hosts: Vec<SerializedHost>,
+}
+
+/// Whether `name` is a safe environment-variable identifier (`[A-Za-z_][A-Za-z0-9_]*`).
+pub fn is_valid_env_name(name: &str) -> bool {
+    let name = name.trim();
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    name.len() <= 128
+        && (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Check whether `name` is set and non-empty in the current process environment,
+/// without ever returning its value.
+pub fn is_env_var_set(name: &str) -> bool {
+    let name = name.trim();
+    if !is_valid_env_name(name) {
+        return false;
+    }
+    env_lookup(name).filter(|v| !v.is_empty()).is_some()
+}
+
+/// Smallest port in `45000..=48999` that is neither listed in `used_ports` nor
+/// bound on loopback right now.
+pub fn next_available_local_port(
+    used_ports: &[u16],
+    is_free: impl Fn(u16) -> bool,
+) -> Option<u16> {
+    (REMOTE_PORT_MIN..=REMOTE_PORT_MAX)
+        .find(|port| !used_ports.contains(port) && is_free(*port))
+}
+
+/// Extract plain `Host` aliases from `~/.ssh/config` text, skipping wildcard
+/// patterns (`*`, `?`, `!`) and anything starting with `-`.
+pub fn parse_ssh_config_hosts(text: &str) -> Vec<String> {
+    let text = text.trim_start_matches('\u{feff}');
+    let mut aliases: Vec<String> = Vec::new();
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let kw_end = line
+            .find(|c: char| c.is_whitespace() || c == '=')
+            .unwrap_or(line.len());
+        if !line[..kw_end].eq_ignore_ascii_case("host") {
+            continue;
+        }
+        let rest = line[kw_end..].trim_start();
+        let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
+        for token in rest.split_whitespace() {
+            if token.starts_with('#') {
+                break;
+            }
+            if token.is_empty()
+                || token.len() > 256
+                || token.starts_with('-')
+                || token.chars().any(|c| {
+                    matches!(c, '*' | '?' | '!' | '"' | '\'' | '\\') || c.is_control()
+                })
+            {
+                continue;
+            }
+            if !aliases.iter().any(|existing| existing == token) {
+                aliases.push(token.to_string());
+            }
+        }
+    }
+    aliases
+}
+
+/// Load non-wildcard `Host` aliases from `%USERPROFILE%\.ssh\config`.
+/// Never fails: returns an empty list if the file is absent or unreadable.
+pub fn load_ssh_config_hosts() -> Vec<String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let path = home.join(".ssh").join("config");
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_ssh_config_hosts(&text),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Load a redacted snapshot of `hosts.json` for the Host Manager window.
+pub fn load_ui_snapshot(dir: &Path) -> HostsUiSnapshot {
+    let path = hosts_path(dir);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_ui_snapshot(&text, &env_lookup),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HostsUiSnapshot {
+            exists: false,
+            active: LOCAL_ID.into(),
+            keep_local_running: true,
+            hosts: Vec::new(),
+            warnings: Vec::new(),
+        },
+        Err(e) => HostsUiSnapshot {
+            exists: false,
+            active: LOCAL_ID.into(),
+            keep_local_running: true,
+            hosts: Vec::new(),
+            warnings: vec![format!("无法读取 {}：{e}", path.display())],
+        },
+    }
+}
+
+pub fn parse_ui_snapshot(text: &str, env: &dyn Fn(&str) -> Option<String>) -> HostsUiSnapshot {
+    let parsed = parse(text, env);
+    let trimmed = text.trim_start_matches('\u{feff}');
+    if trimmed.trim().is_empty() {
+        return HostsUiSnapshot {
+            exists: false,
+            active: LOCAL_ID.into(),
+            keep_local_running: true,
+            hosts: Vec::new(),
+            warnings: Vec::new(),
+        };
+    }
+
+    // Pull password metadata per validated id from the raw JSON object without
+    // ever copying the secret into `HostSummary`.
+    let mut meta: HashMap<String, (Option<String>, bool)> = HashMap::new();
+    if let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(Value::Array(entries)) = obj.get("hosts") {
+            for entry in entries {
+                let Some(eobj) = entry.as_object() else { continue };
+                let Some(id) = eobj.get("id").and_then(Value::as_str).map(str::trim) else {
+                    continue;
+                };
+                if id.is_empty() || meta.contains_key(id) {
+                    continue;
+                }
+                let pw_env = eobj
+                    .get("passwordEnv")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                let has_file_pw = eobj
+                    .get("password")
+                    .and_then(Value::as_str)
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                meta.insert(id.to_owned(), (pw_env, has_file_pw));
+            }
+        }
+    }
+
+    let hosts = parsed
+        .hosts
+        .into_iter()
+        .map(|h| {
+            let (password_env, has_password) = meta.remove(&h.id).unwrap_or((None, false));
+            let password_from_env = password_env
+                .as_deref()
+                .and_then(env)
+                .filter(|v| !v.is_empty())
+                .is_some();
+            HostSummary {
+                id: h.id,
+                label: h.label,
+                ssh_target: h.ssh_target,
+                ssh_port: h.ssh_port,
+                local_port: h.local_port,
+                remote_host: h.remote_host,
+                remote_port: h.remote_port,
+                password_env,
+                has_password,
+                password_from_env,
+            }
+        })
+        .collect();
+
+    HostsUiSnapshot {
+        exists: parsed.exists,
+        active: parsed.active,
+        keep_local_running: parsed.keep_local_running,
+        hosts,
+        warnings: parsed.warnings,
+    }
+}
+
+fn read_existing_disk_entries(dir: &Path) -> (HashSet<String>, HashMap<String, String>) {
+    let mut ids = HashSet::new();
+    let mut passwords = HashMap::new();
+    let Ok(raw) = std::fs::read_to_string(hosts_path(dir)) else {
+        return (ids, passwords);
+    };
+    let trimmed = raw.trim_start_matches('\u{feff}');
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) else {
+        return (ids, passwords);
+    };
+    let Some(Value::Array(entries)) = obj.get("hosts") else {
+        return (ids, passwords);
+    };
+    for entry in entries {
+        let Some(eobj) = entry.as_object() else { continue };
+        let Some(id) = eobj.get("id").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() || !ids.insert(id.to_owned()) {
+            continue;
+        }
+        if let Some(pw) = eobj
+            .get("password")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            passwords.insert(id.to_owned(), pw.to_owned());
+        }
+    }
+    (ids, passwords)
+}
+
+fn resolve_inline_password(
+    draft: &HostDraft,
+    validated_id: &str,
+    existing_ids: &HashSet<String>,
+    existing_passwords: &HashMap<String, String>,
+) -> Option<String> {
+    match &draft.password {
+        PasswordUpdate::Keep { from_id } => {
+            let explicit = from_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    draft
+                        .original_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                });
+            match explicit {
+                Some(key) => existing_passwords.get(key).cloned(),
+                // Brand-new entry (`original_id == None`, `from_id == None`): if
+                // its id happens to reuse the id of a host that was just deleted
+                // in the same edit session, it must NOT inherit the deleted
+                // host's secret.
+                None if existing_ids.contains(validated_id) => None,
+                None => existing_passwords.get(validated_id).cloned(),
+            }
+        }
+        PasswordUpdate::Set { value } => (!value.is_empty()).then(|| value.clone()),
+        PasswordUpdate::Clear => None,
+    }
+}
+
+fn draft_to_serialized(
+    draft: &HostDraft,
+    existing_ids: &HashSet<String>,
+    existing_passwords: &HashMap<String, String>,
+    accepted: &[SerializedHost],
+) -> Result<SerializedHost, String> {
+    let id = draft.id.trim();
+    if id.is_empty() {
+        return Err("主机 ID 不能为空".into());
+    }
+    if id.eq_ignore_ascii_case(LOCAL_ID) {
+        return Err("主机 ID 不能为 \"local\"（保留给 Windows 本地）".into());
+    }
+    if id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(format!(
+            "主机 ID \"{id}\" 只能包含字母、数字、- _ .（最长 64）"
+        ));
+    }
+    if accepted.iter().any(|h| h.id == id) {
+        return Err(format!("主机 ID \"{id}\" 重复"));
+    }
+
+    let ssh_target = draft.ssh_target.trim();
+    if ssh_target.is_empty() {
+        return Err(format!("主机「{id}」缺少 SSH 目标 (sshTarget)"));
+    }
+    if ssh_target.len() > 256
+        || ssh_target.starts_with('-')
+        || ssh_target
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(format!(
+            "SSH 目标 \"{ssh_target}\" 不合法（不能以 - 开头，不能含空白或控制字符）"
+        ));
+    }
+
+    if draft.ssh_port == Some(0) {
+        return Err("SSH 端口必须是 1-65535 之间的整数".into());
+    }
+
+    let local_port = draft.local_port;
+    if !(REMOTE_PORT_MIN..=REMOTE_PORT_MAX).contains(&local_port) {
+        return Err(format!(
+            "本机隧道端口 {local_port} 不在 {REMOTE_PORT_MIN}-{REMOTE_PORT_MAX} 之间"
+        ));
+    }
+    if let Some(other) = accepted.iter().find(|h| h.local_port == local_port) {
+        return Err(format!(
+            "本机隧道端口 {local_port} 与主机「{}」冲突",
+            other.label
+        ));
+    }
+
+    let remote_host = draft
+        .remote_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_REMOTE_HOST);
+    if remote_host.len() > 256
+        || remote_host.starts_with('-')
+        || !remote_host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
+    {
+        return Err(format!("远端监听地址 \"{remote_host}\" 不合法"));
+    }
+
+    let remote_port = draft.remote_port.unwrap_or(DEFAULT_REMOTE_PORT);
+    if remote_port == 0 {
+        return Err("远端端口必须是 1-65535 之间的整数".into());
+    }
+
+    let label: String = draft
+        .label
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    let label = if label.is_empty() {
+        id.to_owned()
+    } else if label.chars().count() > 128 {
+        label.chars().take(128).collect()
+    } else {
+        label
+    };
+
+    let password_env = draft
+        .password_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if let Some(ref env_name) = password_env {
+        if !is_valid_env_name(env_name) {
+            return Err(format!(
+                "环境变量名 \"{env_name}\" 不合法（仅允许字母、数字与下划线，且不能以数字开头）"
+            ));
+        }
+    }
+
+    let password = resolve_inline_password(draft, id, existing_ids, existing_passwords);
+
+    Ok(SerializedHost {
+        id: id.to_owned(),
+        label,
+        ssh_target: ssh_target.to_owned(),
+        ssh_port: draft.ssh_port,
+        local_port,
+        remote_host: remote_host.to_owned(),
+        remote_port,
+        password_env,
+        password,
+    })
+}
+
+/// Validate a single draft from the Host Manager form for "测试连接" without
+/// touching disk. Also returns `Some(env_name)` when `passwordEnv` was filled
+/// in, is currently unset/empty in the OS environment, and no fallback inline
+/// password applies.
+pub fn validate_draft_for_probe(
+    dir: &Path,
+    draft: &HostDraft,
+) -> Result<(HostConfig, Option<String>), String> {
+    let (existing_ids, existing_passwords) = read_existing_disk_entries(dir);
+    // Allow an empty id during a quick probe before the user named the host by
+    // substituting a harmless placeholder for validation.
+    let mut probe_draft = draft.clone();
+    if probe_draft.id.trim().is_empty() {
+        probe_draft.id = "probe-host".into();
+    }
+    let ser = draft_to_serialized(&probe_draft, &existing_ids, &existing_passwords, &[])?;
+
+    let from_env = ser
+        .password_env
+        .as_deref()
+        .and_then(env_lookup)
+        .filter(|v| !v.is_empty());
+    let unset_env = match (&ser.password_env, &from_env, &ser.password) {
+        (Some(name), None, None) => Some(name.clone()),
+        _ => None,
+    };
+    let password = from_env.or(ser.password);
+
+    Ok((
+        HostConfig {
+            id: ser.id,
+            label: ser.label,
+            ssh_target: ser.ssh_target,
+            ssh_port: ser.ssh_port,
+            local_port: ser.local_port,
+            remote_host: ser.remote_host,
+            remote_port: ser.remote_port,
+            password,
+        },
+        unset_env,
+    ))
+}
+
+/// Validate and atomically write `%APPDATA%\Pi\hosts.json` as standard UTF-8
+/// JSON (no BOM), preserving untouched inline passwords from any prior file.
+///
+/// Returns the resolved `"active"` id written to disk (which follows an id
+/// rename when `preferred_active` matched `original_id`, or falls back to
+/// `LOCAL_ID` if the active host was deleted).
+pub fn save_config(
+    dir: &Path,
+    keep_local_running: bool,
+    drafts: &[HostDraft],
+    preferred_active: &str,
+) -> Result<String, String> {
+    let _io = FILE_IO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (existing_ids, existing_passwords) = read_existing_disk_entries(dir);
+    let mut serialized: Vec<SerializedHost> = Vec::with_capacity(drafts.len());
+    for draft in drafts {
+        let host = draft_to_serialized(draft, &existing_ids, &existing_passwords, &serialized)?;
+        serialized.push(host);
+    }
+
+    let pref = preferred_active.trim();
+    let active = if pref.is_empty() || pref.eq_ignore_ascii_case(LOCAL_ID) {
+        LOCAL_ID.to_owned()
+    } else if let Some((_, tracked)) = drafts.iter().zip(serialized.iter()).find(|(d, _)| {
+        d.original_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            == Some(pref)
+    }) {
+        // Priority 1: follow the exact entry that originated as `pref`, even
+        // when its id was renamed AND another entry took over the old `pref` id.
+        tracked.id.clone()
+    } else if existing_ids.contains(pref) {
+        // `pref` existed on disk before this save, yet no surviving entry has
+        // `original_id == Some(pref)`: the active host was deleted. Even if the
+        // user added a brand-new host reusing the same id string, fall back to
+        // local rather than silently treating the new host as the old session.
+        LOCAL_ID.to_owned()
+    } else if serialized.iter().any(|h| h.id == pref) {
+        // Fresh file creation where `pref` never existed on disk yet.
+        pref.to_owned()
+    } else {
+        LOCAL_ID.to_owned()
+    };
+
+    let doc = SerializedHostsFile {
+        active: active.clone(),
+        keep_local_running,
+        hosts: serialized,
+    };
+    let mut text =
+        serde_json::to_string_pretty(&doc).map_err(|e| format!("序列化 hosts.json 失败：{e}"))?;
+    text.push('\n');
+
+    // Round-trip self-check through `parse()` before touching disk: guarantees
+    // the writer and reader can never disagree on validation rules.
+    let check = parse(&text, &|_| None);
+    if !check.warnings.is_empty() || check.hosts.len() != doc.hosts.len() {
+        return Err(format!(
+            "hosts.json 写前自检失败：{}",
+            check.warnings.join("；")
+        ));
+    }
+
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("无法创建配置目录 {}：{e}", dir.display()))?;
+    let path = hosts_path(dir);
+    let tmp = unique_tmp_path(dir);
+    std::fs::write(&tmp, text.as_bytes())
+        .map_err(|e| format!("无法写入临时文件 {}：{e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("无法原子替换 {}：{e}", path.display())
+    })?;
+
+    log_dbg!(
+        "hosts: saved {} host(s) to {} (active={}, keepLocalRunning={})",
+        doc.hosts.len(),
+        path.display(),
+        active,
+        keep_local_running
+    );
+    Ok(active)
 }
 
 #[cfg(test)]
@@ -773,6 +1402,378 @@ mod tests {
         std::fs::write(hosts_path(&dir), "{ broken").unwrap();
         assert!(save_active(&dir, "local").is_err());
         assert_eq!(std::fs::read_to_string(hosts_path(&dir)).unwrap(), "{ broken");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ssh_config_extracts_only_plain_host_aliases() {
+        let cfg = "\u{feff}\
+            # Global defaults\n\
+            Host *\n\
+              ServerAliveInterval 15\n\
+            \n\
+            Host mac mac-mini.local *.lan !mac-old -oProxyCommand=calc\n\
+              HostName 192.168.100.10\n\
+              User agegr\n\
+            host = 130   arch-box?  dev_01 # inline comment\n\
+            HOST\tprod-1\tmac\n\
+            Match host something\n\
+              User root\n";
+        assert_eq!(
+            parse_ssh_config_hosts(cfg),
+            vec!["mac", "mac-mini.local", "130", "dev_01", "prod-1"]
+        );
+    }
+
+    #[test]
+    fn next_available_port_skips_configured_and_bound_ports() {
+        let used = [45000u16, 45001, 45003];
+        // 45002 is not in `used`, but pretend the OS reports it busy; 45004 wins.
+        let picked = next_available_local_port(&used, |p| p != 45002);
+        assert_eq!(picked, Some(45004));
+
+        // Nothing used, all free -> starts at REMOTE_PORT_MIN (45000).
+        assert_eq!(next_available_local_port(&[], |_| true), Some(45000));
+        // When 45000 is used, 45001 is next.
+        assert_eq!(next_available_local_port(&[45000], |_| true), Some(45001));
+        // Exhausted pool -> None.
+        assert_eq!(next_available_local_port(&[], |_| false), None);
+    }
+
+    #[test]
+    fn ui_snapshot_never_exposes_passwords_or_env_values() {
+        let text = r#"{
+          "active": "arch-130",
+          "keepLocalRunning": false,
+          "hosts": [
+            {
+              "id": "mac-mini",
+              "label": "Mac mini",
+              "sshTarget": "mac",
+              "localPort": 45001,
+              "passwordEnv": "PW_MAC",
+              "password": "file-secret-mac"
+            },
+            {
+              "id": "arch-130",
+              "label": "Arch",
+              "sshTarget": "130",
+              "localPort": 45002,
+              "password": "file-secret-130"
+            },
+            {
+              "id": "dev-box",
+              "sshTarget": "dev",
+              "localPort": 45003,
+              "passwordEnv": "PW_UNSET"
+            }
+          ]
+        }"#;
+        let env = |name: &str| (name == "PW_MAC").then(|| "env-secret-mac".to_string());
+        let snap = parse_ui_snapshot(text, &env);
+        assert!(!snap.keep_local_running);
+        assert_eq!(snap.hosts.len(), 3);
+
+        assert!(snap.hosts[0].has_password);
+        assert!(snap.hosts[0].password_from_env);
+        assert_eq!(snap.hosts[0].password_env.as_deref(), Some("PW_MAC"));
+
+        assert!(snap.hosts[1].has_password);
+        assert!(!snap.hosts[1].password_from_env);
+        assert_eq!(snap.hosts[1].password_env, None);
+
+        assert!(!snap.hosts[2].has_password);
+        assert!(!snap.hosts[2].password_from_env);
+        assert_eq!(snap.hosts[2].password_env.as_deref(), Some("PW_UNSET"));
+
+        let json = serde_json::to_string(&snap).unwrap();
+        assert!(!json.contains("file-secret-mac"), "{json}");
+        assert!(!json.contains("file-secret-130"), "{json}");
+        assert!(!json.contains("env-secret-mac"), "{json}");
+    }
+
+    #[test]
+    fn save_config_creates_utf8_no_bom_and_handles_password_modes() {
+        let dir = temp_dir("save-cfg");
+        assert!(!hosts_path(&dir).exists());
+
+        // 1. Fresh creation when hosts.json does not exist yet.
+        let initial = vec![
+            HostDraft {
+                id: "mac-mini".into(),
+                original_id: None,
+                label: "Mac mini".into(),
+                ssh_target: "mac".into(),
+                ssh_port: Some(22),
+                local_port: 45001,
+                remote_host: None,
+                remote_port: None,
+                password_env: Some("PIWD_TEST_ONLY_ENV_MAC".into()),
+                password: PasswordUpdate::Set {
+                    value: "alpha-secret".into(),
+                },
+            },
+            HostDraft {
+                id: "arch-130".into(),
+                original_id: None,
+                label: "Arch 130".into(),
+                ssh_target: "130".into(),
+                ssh_port: None,
+                local_port: 45002,
+                remote_host: Some("127.0.0.1".into()),
+                remote_port: Some(30141),
+                password_env: None,
+                password: PasswordUpdate::Set {
+                    value: "  spaced-secret  ".into(),
+                },
+            },
+        ];
+        save_config(&dir, false, &initial, "arch-130").unwrap();
+
+        let bytes = std::fs::read(hosts_path(&dir)).unwrap();
+        assert!(
+            !bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+            "saved hosts.json must be UTF-8 without BOM"
+        );
+        let loaded = parse(&std::fs::read_to_string(hosts_path(&dir)).unwrap(), &no_env);
+        assert_eq!(loaded.active, "arch-130");
+        assert!(!loaded.keep_local_running);
+        assert_eq!(loaded.hosts[0].password.as_deref(), Some("alpha-secret"));
+        assert_eq!(loaded.hosts[1].password.as_deref(), Some("  spaced-secret  "));
+
+        // 2. Edit: keep password on renamed host, clear password on second host, add third.
+        let edited = vec![
+            HostDraft {
+                id: "mac-studio".into(),
+                original_id: Some("mac-mini".into()),
+                label: "Mac Studio".into(),
+                ssh_target: "mac".into(),
+                ssh_port: None,
+                local_port: 45001,
+                remote_host: Some("127.0.0.1".into()),
+                remote_port: Some(30141),
+                password_env: None,
+                password: PasswordUpdate::Keep { from_id: None },
+            },
+            HostDraft {
+                id: "arch-130".into(),
+                original_id: Some("arch-130".into()),
+                label: "Arch 130".into(),
+                ssh_target: "130".into(),
+                ssh_port: None,
+                local_port: 45002,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Clear,
+            },
+            HostDraft {
+                id: "box-3".into(),
+                original_id: None,
+                label: "Box 3".into(),
+                ssh_target: "user@10.0.0.3".into(),
+                ssh_port: Some(2222),
+                local_port: 45003,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Keep { from_id: None },
+            },
+        ];
+        save_config(&dir, true, &edited, "mac-mini").unwrap();
+
+        let loaded2 = parse(&std::fs::read_to_string(hosts_path(&dir)).unwrap(), &no_env);
+        assert!(loaded2.keep_local_running);
+        // Active followed the renamed original_id mac-mini -> mac-studio.
+        assert_eq!(loaded2.active, "mac-studio");
+        assert_eq!(
+            loaded2.find("mac-studio").unwrap().password.as_deref(),
+            Some("alpha-secret"),
+            "untouched password must survive edits and id renames"
+        );
+        assert_eq!(
+            loaded2.find("arch-130").unwrap().password,
+            None,
+            "cleared password must be removed"
+        );
+        assert_eq!(loaded2.find("box-3").unwrap().password, None);
+
+        // 3. Reject injection / duplicate ports without clobbering existing file.
+        let bad = vec![HostDraft {
+            id: "evil".into(),
+            original_id: None,
+            label: "Evil".into(),
+            ssh_target: "-oProxyCommand=calc.exe".into(),
+            ssh_port: None,
+            local_port: 45005,
+            remote_host: None,
+            remote_port: None,
+            password_env: None,
+            password: PasswordUpdate::Clear,
+        }];
+        assert!(save_config(&dir, true, &bad, "local").is_err());
+        assert_eq!(load(&dir).hosts.len(), 3, "failed save must leave disk untouched");
+
+        // 4. Probe validation resolves kept file password on backend and rejects bad options.
+        let (probe_cfg, unset_env) = validate_draft_for_probe(
+            &dir,
+            &HostDraft {
+                id: "mac-studio".into(),
+                original_id: Some("mac-studio".into()),
+                label: "Mac Studio".into(),
+                ssh_target: "mac".into(),
+                ssh_port: None,
+                local_port: 45001,
+                remote_host: None,
+                remote_port: None,
+                password_env: Some("PIWD_DEFINITELY_UNSET_ENV_999".into()),
+                password: PasswordUpdate::Keep { from_id: None },
+            },
+        )
+        .unwrap();
+        assert_eq!(probe_cfg.password.as_deref(), Some("alpha-secret"));
+        // Fallback file password is present, so `unset_env` is None.
+        assert_eq!(unset_env, None);
+
+        let (probe_no_pw, unset_env2) = validate_draft_for_probe(
+            &dir,
+            &HostDraft {
+                id: "new-box".into(),
+                original_id: None,
+                label: "New".into(),
+                ssh_target: "10.0.0.9".into(),
+                ssh_port: None,
+                local_port: 45010,
+                remote_host: None,
+                remote_port: None,
+                password_env: Some("PIWD_DEFINITELY_UNSET_ENV_999".into()),
+                password: PasswordUpdate::Clear,
+            },
+        )
+        .unwrap();
+        assert_eq!(probe_no_pw.password, None);
+        assert_eq!(unset_env2.as_deref(), Some("PIWD_DEFINITELY_UNSET_ENV_999"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn next_available_port_skips_real_bound_loopback_socket() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        // Bind a specific port in the tunnel range if free, to verify real OS check.
+        if let Ok(bound) = std::net::TcpListener::bind(("127.0.0.1", REMOTE_PORT_MIN)) {
+            let chosen = next_available_local_port(&[], crate::server::is_free).unwrap();
+            assert_ne!(chosen, REMOTE_PORT_MIN);
+            drop(bound);
+        }
+        drop(listener);
+    }
+
+    #[test]
+    fn save_config_tracks_identity_across_id_swap_and_delete_then_reuse() {
+        let dir = temp_dir("id-swap");
+        let initial = vec![
+            HostDraft {
+                id: "a".into(),
+                original_id: None,
+                label: "Host A".into(),
+                ssh_target: "host-a".into(),
+                ssh_port: None,
+                local_port: 45001,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Set { value: "pw-a".into() },
+            },
+            HostDraft {
+                id: "b".into(),
+                original_id: None,
+                label: "Host B".into(),
+                ssh_target: "host-b".into(),
+                ssh_port: None,
+                local_port: 45002,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Set { value: "pw-b".into() },
+            },
+        ];
+        save_config(&dir, true, &initial, "a").unwrap();
+
+        // 1. Rename active "a" -> "c" while simultaneously renaming "b" -> "a".
+        let swapped = vec![
+            HostDraft {
+                id: "c".into(),
+                original_id: Some("a".into()),
+                label: "Host A->C".into(),
+                ssh_target: "host-a".into(),
+                ssh_port: None,
+                local_port: 45001,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Keep { from_id: None },
+            },
+            HostDraft {
+                id: "a".into(),
+                original_id: Some("b".into()),
+                label: "Host B->A".into(),
+                ssh_target: "host-b".into(),
+                ssh_port: None,
+                local_port: 45002,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Keep { from_id: None },
+            },
+        ];
+        let resolved = save_config(&dir, true, &swapped, "a").unwrap();
+        assert_eq!(resolved, "c", "active must follow original_id a -> c, not new a");
+        let loaded = parse(&std::fs::read_to_string(hosts_path(&dir)).unwrap(), &no_env);
+        assert_eq!(loaded.active, "c");
+        assert_eq!(loaded.find("c").unwrap().password.as_deref(), Some("pw-a"));
+        assert_eq!(loaded.find("a").unwrap().password.as_deref(), Some("pw-b"));
+
+        // 2. Delete active "c", and in the same save add a brand-new host reusing id "c".
+        let deleted_and_reused = vec![
+            HostDraft {
+                id: "a".into(),
+                original_id: Some("a".into()),
+                label: "Host B->A".into(),
+                ssh_target: "host-b".into(),
+                ssh_port: None,
+                local_port: 45002,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Keep { from_id: None },
+            },
+            HostDraft {
+                id: "c".into(),
+                original_id: None,
+                label: "Brand New C".into(),
+                ssh_target: "new-c".into(),
+                ssh_port: None,
+                local_port: 45003,
+                remote_host: None,
+                remote_port: None,
+                password_env: None,
+                password: PasswordUpdate::Keep { from_id: None },
+            },
+        ];
+        let resolved2 = save_config(&dir, true, &deleted_and_reused, "c").unwrap();
+        assert_eq!(
+            resolved2, LOCAL_ID,
+            "deleting active c and adding a fresh c must fall back to local"
+        );
+        let loaded2 = parse(&std::fs::read_to_string(hosts_path(&dir)).unwrap(), &no_env);
+        assert_eq!(loaded2.active, LOCAL_ID);
+        assert_eq!(
+            loaded2.find("c").unwrap().password,
+            None,
+            "brand-new host reusing deleted id must not inherit deleted host's password"
+        );
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }

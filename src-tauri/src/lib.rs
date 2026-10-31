@@ -9,6 +9,7 @@ mod app;
 mod commands;
 mod guard;
 mod hosts;
+mod hosts_ui;
 mod job;
 pub mod log;
 mod menu;
@@ -51,6 +52,13 @@ pub fn run() {
             commands::select_directory,
             commands::theme_changed,
             commands::apply_update,
+            hosts_ui::hosts_get_state,
+            hosts_ui::hosts_suggest_port,
+            hosts_ui::hosts_check_env,
+            hosts_ui::hosts_test_connection,
+            hosts_ui::hosts_save,
+            hosts_ui::hosts_open_dir,
+            hosts_ui::hosts_close_window,
         ])
         .setup(|tauri_app| {
             let handle = tauri_app.handle().clone();
@@ -132,6 +140,18 @@ pub fn run() {
                 window = window.theme(Some(theme));
             }
             let window = window.build()?;
+            {
+                let close_handle = handle.clone();
+                window.on_window_event(move |event| {
+                    if matches!(event, tauri::WindowEvent::Destroyed) {
+                        // Closing the main Pi window must also close any open
+                        // secondary dialog so the process exits cleanly.
+                        if let Some(hm) = close_handle.get_webview_window(hosts_ui::HOSTS_WINDOW) {
+                            let _ = hm.close();
+                        }
+                    }
+                });
+            }
 
             // The base every later local navigation is resolved against
             // (http://tauri.localhost/ on Windows). Captured rather than

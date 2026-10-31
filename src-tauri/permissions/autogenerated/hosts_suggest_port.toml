@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hosts-suggest-port"
+description = "Enables the hosts_suggest_port command without any pre-configured scope."
+commands.allow = ["hosts_suggest_port"]
+
+[[permission]]
+identifier = "deny-hosts-suggest-port"
+description = "Denies the hosts_suggest_port command without any pre-configured scope."
+commands.deny = ["hosts_suggest_port"]

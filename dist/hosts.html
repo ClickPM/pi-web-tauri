@@ -1,0 +1,1796 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Marks this as one of the shell's OWN pages (never receives preload.js). -->
+    <meta name="piwd-shell" content="1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';"
+    />
+    <title>管理远程主机 — Pi</title>
+    <style>
+      :root {
+        --bg: #0A0A0A;
+        --bg-panel: #141414;
+        --bg-elevated: #1B1B1B;
+        --bg-hover: #222222;
+        --text: #FFFFFF;
+        --text-muted: #B0B0B0;
+        --text-dim: #6E6E6E;
+        --border: rgba(255, 255, 255, 0.09);
+        --border-strong: rgba(255, 255, 255, 0.18);
+        --accent: #0050EF;
+        --accent-hover: #2F6BFF;
+        --green: #60A917;
+        --amber: #F0A30A;
+        --red: #E51400;
+        --font-ui: "Segoe UI", Selawik, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+        --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-ui);
+        font-size: 13px;
+        user-select: none;
+        overflow: hidden;
+      }
+
+      input, button, pre {
+        font-family: inherit;
+      }
+
+      .app {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+
+      /* --- Header & global toggle --- */
+      .topbar {
+        flex: 0 0 auto;
+        padding: 14px 18px 12px;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .topbar-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .topbar-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .topbar-title h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 300;
+        letter-spacing: 0.4px;
+      }
+
+      .dirty-pill {
+        display: none;
+        padding: 1px 7px;
+        font-size: 11px;
+        background: rgba(240, 163, 10, 0.16);
+        border-left: 2px solid var(--amber);
+        color: var(--amber);
+      }
+
+      .dirty-pill.visible {
+        display: inline-block;
+      }
+
+      .config-path {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-dim);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        max-width: 380px;
+        user-select: text;
+      }
+
+      .global-opt {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        color: var(--text-muted);
+        font-size: 12.5px;
+      }
+
+      .global-opt input[type="checkbox"] {
+        width: 15px;
+        height: 15px;
+        margin: 0;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+
+      .warnings-banner {
+        display: none;
+        padding: 8px 12px;
+        background: rgba(240, 163, 10, 0.10);
+        border: 1px solid rgba(240, 163, 10, 0.28);
+        border-left: 3px solid var(--amber);
+        color: #FFD782;
+        font-size: 12px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        user-select: text;
+      }
+
+      .warnings-banner.visible {
+        display: block;
+      }
+
+      /* --- Two-column workspace --- */
+      .workspace {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: grid;
+        grid-template-columns: 280px 1fr;
+      }
+
+      .sidebar {
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        background: #0E0E0E;
+      }
+
+      .sidebar-head {
+        flex: 0 0 auto;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .sidebar-title {
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.4px;
+        color: var(--text-muted);
+        text-transform: uppercase;
+      }
+
+      .host-list {
+        flex: 1 1 auto;
+        overflow-y: auto;
+        padding: 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .empty-list {
+        padding: 28px 14px;
+        text-align: center;
+        color: var(--text-dim);
+        font-size: 12.5px;
+        line-height: 1.7;
+      }
+
+      .host-card {
+        background: var(--bg-panel);
+        border: 1px solid var(--border);
+        border-left: 3px solid transparent;
+        padding: 9px 10px;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .host-card:hover {
+        background: var(--bg-elevated);
+      }
+
+      .host-card.selected {
+        background: var(--bg-elevated);
+        border-color: var(--border-strong);
+        border-left-color: var(--accent);
+      }
+
+      .card-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+
+      .card-name {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--text);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .badges {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .tag {
+        padding: 1px 5px;
+        font-size: 10.5px;
+        line-height: 1.4;
+        border: 1px solid var(--border);
+        color: var(--text-muted);
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .tag.env {
+        border-color: rgba(47, 107, 255, 0.45);
+        color: #7AA7FF;
+        background: rgba(0, 80, 239, 0.14);
+      }
+
+      .tag.pw {
+        border-color: rgba(96, 169, 23, 0.45);
+        color: #9BE061;
+        background: rgba(96, 169, 23, 0.13);
+      }
+
+      .tag.none {
+        color: var(--text-dim);
+      }
+
+      .tag.active {
+        border-color: rgba(96, 169, 23, 0.6);
+        color: #B4F084;
+        background: rgba(96, 169, 23, 0.2);
+      }
+
+      .card-line {
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        color: var(--text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .card-line.dim {
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+
+      .card-actions {
+        margin-top: 3px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .mini-btn {
+        background: transparent;
+        color: var(--text-muted);
+        border: 1px solid var(--border);
+        border-radius: 0;
+        padding: 2px 7px;
+        font-size: 11px;
+        cursor: pointer;
+      }
+
+      .mini-btn:hover:not(:disabled) {
+        background: var(--bg-hover);
+        color: var(--text);
+        border-color: var(--border-strong);
+      }
+
+      .mini-btn:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+
+      .mini-btn.danger:hover:not(:disabled) {
+        border-color: rgba(229, 20, 0, 0.65);
+        color: #FF7A6B;
+        background: rgba(229, 20, 0, 0.12);
+      }
+
+      /* --- Editor pane --- */
+      .editor-pane {
+        min-height: 0;
+        overflow-y: auto;
+        padding: 16px 20px 20px;
+      }
+
+      .editor-empty {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        color: var(--text-dim);
+        text-align: center;
+      }
+
+      .editor-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 14px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .editor-head h2 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.2px;
+      }
+
+      .editor-mode {
+        font-size: 11.5px;
+        color: var(--text-dim);
+      }
+
+      .grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .grid-ssh {
+        display: grid;
+        grid-template-columns: 1fr 130px;
+        gap: 12px;
+      }
+
+      .field {
+        margin-bottom: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .field label {
+        font-size: 12px;
+        color: var(--text-muted);
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 6px;
+      }
+
+      .field label code {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+
+      input[type="text"],
+      input[type="number"],
+      input[type="password"] {
+        width: 100%;
+        background: var(--bg-panel);
+        color: var(--text);
+        border: 1px solid var(--border-strong);
+        border-radius: 0;
+        padding: 7px 9px;
+        font-size: 12.5px;
+        outline: none;
+      }
+
+      input.mono {
+        font-family: var(--font-mono);
+      }
+
+      input:focus {
+        border-color: var(--accent-hover);
+      }
+
+      input::placeholder {
+        color: var(--text-dim);
+      }
+
+      .hint {
+        font-size: 11.5px;
+        color: var(--text-dim);
+        line-height: 1.45;
+      }
+
+      .hint.ok {
+        color: #8CD948;
+      }
+
+      .hint.warn {
+        color: #FFC65C;
+      }
+
+      .hint.err {
+        color: #FF6F5E;
+      }
+
+      .origin-warning {
+        display: none;
+        margin-top: 4px;
+        padding: 8px 10px;
+        background: rgba(240, 163, 10, 0.12);
+        border: 1px solid rgba(240, 163, 10, 0.35);
+        border-left: 3px solid var(--amber);
+        color: #FFD57E;
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .origin-warning.visible {
+        display: block;
+      }
+
+      .alias-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 5px;
+        margin-top: 2px;
+      }
+
+      .alias-label {
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+
+      .alias-chip {
+        background: var(--bg-panel);
+        color: #8AB4FF;
+        border: 1px solid rgba(47, 107, 255, 0.38);
+        border-radius: 0;
+        padding: 1px 7px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        cursor: pointer;
+      }
+
+      .alias-chip:hover {
+        background: rgba(0, 80, 239, 0.22);
+        color: #FFFFFF;
+      }
+
+      .pw-row {
+        display: flex;
+        gap: 6px;
+      }
+
+      .pw-row input {
+        flex: 1 1 auto;
+      }
+
+      /* --- Buttons --- */
+      .btn {
+        background: var(--bg-elevated);
+        color: var(--text);
+        border: 1px solid var(--border-strong);
+        border-radius: 0;
+        padding: 7px 14px;
+        font-size: 12.5px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .btn:hover:not(:disabled) {
+        background: var(--bg-hover);
+      }
+
+      .btn:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      .btn.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        font-weight: 600;
+      }
+
+      .btn.primary:hover:not(:disabled) {
+        background: var(--accent-hover);
+        border-color: var(--accent-hover);
+      }
+
+      .btn.small {
+        padding: 5px 10px;
+        font-size: 12px;
+      }
+
+      /* --- Connection probe panel --- */
+      .probe-box {
+        margin-top: 14px;
+        background: var(--bg-panel);
+        border: 1px solid var(--border);
+        padding: 12px 14px;
+        user-select: text;
+      }
+
+      .probe-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+
+      .probe-title {
+        font-size: 12.5px;
+        font-weight: 600;
+      }
+
+      .probe-steps {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .step-item {
+        padding: 8px 10px;
+        background: #0F0F0F;
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--text-dim);
+      }
+
+      .step-item.pass {
+        border-left-color: var(--green);
+      }
+
+      .step-item.fail {
+        border-left-color: var(--red);
+      }
+
+      .step-item.skipped {
+        border-left-color: var(--text-dim);
+        opacity: 0.72;
+      }
+
+      .step-top {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .step-name {
+        font-weight: 600;
+        font-size: 12px;
+      }
+
+      .step-meta {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-dim);
+      }
+
+      .step-summary {
+        margin-top: 3px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+
+      .step-item.pass .step-summary {
+        color: #9EE267;
+      }
+
+      .step-item.fail .step-summary {
+        color: #FF7868;
+      }
+
+      .step-detail {
+        margin-top: 5px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--text-dim);
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.45;
+      }
+
+      /* --- Footer --- */
+      .footer {
+        flex: 0 0 auto;
+        padding: 10px 18px;
+        background: var(--bg-panel);
+        border-top: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .footer-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .status-text {
+        font-size: 12px;
+        color: var(--text-muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .status-text.ok {
+        color: #98E05F;
+      }
+
+      .status-text.err {
+        color: #FF7262;
+      }
+
+      .footer-right {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="topbar">
+        <div class="topbar-row">
+          <div class="topbar-title">
+            <h1>远程主机管理</h1>
+            <span class="dirty-pill" id="dirty-pill">有未保存修改</span>
+          </div>
+          <div class="config-path" id="config-path" title=""></div>
+        </div>
+        <div class="topbar-row">
+          <label class="global-opt">
+            <input type="checkbox" id="keep-local-running" checked />
+            <span>切换远端时保持 Windows 本地服务在后台运行 (keepLocalRunning)</span>
+          </label>
+        </div>
+        <div class="warnings-banner" id="warnings-banner"></div>
+      </div>
+
+      <div class="workspace">
+        <div class="sidebar">
+          <div class="sidebar-head">
+            <span class="sidebar-title" id="list-heading">远端主机 (0)</span>
+            <button type="button" class="btn primary small" id="btn-add">+ 新增主机</button>
+          </div>
+          <div class="host-list" id="host-list"></div>
+        </div>
+
+        <div class="editor-pane" id="editor-pane">
+          <div class="editor-empty" id="editor-empty">
+            <div>当前尚未配置任何远端主机。</div>
+            <button type="button" class="btn primary" id="btn-add-empty">+ 新增第一台远程主机</button>
+          </div>
+
+          <div id="editor-form" style="display: none;">
+            <div class="editor-head">
+              <h2 id="form-heading">编辑远程主机</h2>
+              <span class="editor-mode" id="form-mode"></span>
+            </div>
+
+            <div class="grid-2">
+              <div class="field">
+                <label for="f-label"><span>显示名称</span><code>label</code></label>
+                <input type="text" id="f-label" placeholder="例如：Mac mini / Arch Linux" autocomplete="off" />
+              </div>
+              <div class="field">
+                <label for="f-id"><span>主机 ID</span><code>id</code></label>
+                <input type="text" class="mono" id="f-id" placeholder="例如：mac-mini" autocomplete="off" />
+                <div class="hint" id="id-hint">仅限字母、数字与 - _ .，禁止为 local</div>
+              </div>
+            </div>
+
+            <div class="grid-ssh">
+              <div class="field">
+                <label for="f-ssh-target"><span>SSH 目标</span><code>sshTarget</code></label>
+                <input
+                  type="text"
+                  class="mono"
+                  id="f-ssh-target"
+                  list="ssh-aliases"
+                  placeholder="~/.ssh/config 别名（如 mac）或 user@ip"
+                  autocomplete="off"
+                />
+                <datalist id="ssh-aliases"></datalist>
+                <div class="alias-row" id="alias-chips"></div>
+              </div>
+              <div class="field">
+                <label for="f-ssh-port"><span>SSH 端口（可选）</span><code>sshPort</code></label>
+                <input type="number" class="mono" id="f-ssh-port" min="1" max="65535" placeholder="默认随 config" />
+              </div>
+            </div>
+
+            <div class="grid-2">
+              <div class="field">
+                <label for="f-local-port"><span>本机隧道端口</span><code>localPort</code></label>
+                <input type="number" class="mono" id="f-local-port" min="45000" max="48999" />
+                <div class="hint" id="port-hint">范围 45000–48999，每台主机固定独立端口</div>
+                <div class="origin-warning" id="origin-warning">
+                  修改本机端口会改变浏览器 Origin，该远端主机的主题/隐藏目录等本地偏好将重新开始
+                </div>
+              </div>
+              <div class="grid-2" style="gap: 8px;">
+                <div class="field">
+                  <label for="f-remote-host"><span>远端监听地址</span><code>remoteHost</code></label>
+                  <input type="text" class="mono" id="f-remote-host" placeholder="127.0.0.1" autocomplete="off" />
+                </div>
+                <div class="field">
+                  <label for="f-remote-port"><span>远端端口</span><code>remotePort</code></label>
+                  <input type="number" class="mono" id="f-remote-port" min="1" max="65535" placeholder="30141" />
+                </div>
+              </div>
+            </div>
+
+            <div class="grid-2">
+              <div class="field">
+                <label for="f-pw-env"><span>口令环境变量名（可选）</span><code>passwordEnv</code></label>
+                <input
+                  type="text"
+                  class="mono"
+                  id="f-pw-env"
+                  placeholder="如 PI_WEB_REMOTE_PASSWORD_MAC"
+                  autocomplete="off"
+                />
+                <div class="hint" id="env-hint">推荐将口令存于系统用户环境变量（优先于直接口令）</div>
+              </div>
+              <div class="field">
+                <label for="f-pw"><span>直接口令（可选）</span><code>password</code></label>
+                <div class="pw-row">
+                  <input type="password" id="f-pw" placeholder="留空表示不设直接口令" autocomplete="new-password" />
+                  <button type="button" class="btn small" id="btn-pw-clear" style="display: none;">清空口令</button>
+                  <button type="button" class="btn small" id="btn-pw-keep" style="display: none;">保持原口令</button>
+                </div>
+                <div class="hint" id="pw-hint">若远端未设 PI_WEB_PASSWORD 可留空</div>
+              </div>
+            </div>
+
+            <div class="probe-box">
+              <div class="probe-head">
+                <span class="probe-title">连接诊断（非破坏性探活）</span>
+                <button type="button" class="btn small" id="btn-test">测试连接</button>
+              </div>
+              <div id="probe-body" class="hint">
+                点击「测试连接」将使用系统 OpenSSH 建立临时隧道，依次验证 SSH 连通性、远端 pi-web 响应与口令鉴权。
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div class="footer-left">
+          <button type="button" class="btn small" id="btn-open-dir">打开配置目录</button>
+          <button type="button" class="btn small" id="btn-reset" style="display: none;">放弃未保存修改</button>
+          <span class="status-text" id="status-text"></span>
+        </div>
+        <div class="footer-right">
+          <button type="button" class="btn" id="btn-close">关闭</button>
+          <button type="button" class="btn primary" id="btn-save">保存并生效</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        "use strict";
+
+        function invoke(cmd, payload) {
+          var internals = window.__TAURI_INTERNALS__;
+          if (!internals || typeof internals.invoke !== "function") {
+            return Promise.reject(new Error("Tauri IPC 不可用"));
+          }
+          return internals.invoke(cmd, payload || {});
+        }
+
+        var state = {
+          configPath: "",
+          activeTarget: "local",
+          keepLocalRunning: true,
+          sshAliases: [],
+          hosts: [],
+          selectedIndex: -1,
+          dirty: false,
+          editRevision: 0,
+          adding: false,
+          saving: false,
+          testing: false,
+          envCache: {},
+        };
+
+        var elKeepLocal = document.getElementById("keep-local-running");
+        var elDirtyPill = document.getElementById("dirty-pill");
+        var elConfigPath = document.getElementById("config-path");
+        var elWarnings = document.getElementById("warnings-banner");
+        var elListHeading = document.getElementById("list-heading");
+        var elHostList = document.getElementById("host-list");
+        var elEditorEmpty = document.getElementById("editor-empty");
+        var elEditorForm = document.getElementById("editor-form");
+        var elFormHeading = document.getElementById("form-heading");
+        var elFormMode = document.getElementById("form-mode");
+
+        var elLabel = document.getElementById("f-label");
+        var elId = document.getElementById("f-id");
+        var elIdHint = document.getElementById("id-hint");
+        var elSshTarget = document.getElementById("f-ssh-target");
+        var elSshPort = document.getElementById("f-ssh-port");
+        var elAliasesList = document.getElementById("ssh-aliases");
+        var elAliasChips = document.getElementById("alias-chips");
+        var elLocalPort = document.getElementById("f-local-port");
+        var elPortHint = document.getElementById("port-hint");
+        var elOriginWarn = document.getElementById("origin-warning");
+        var elRemoteHost = document.getElementById("f-remote-host");
+        var elRemotePort = document.getElementById("f-remote-port");
+        var elPwEnv = document.getElementById("f-pw-env");
+        var elEnvHint = document.getElementById("env-hint");
+        var elPw = document.getElementById("f-pw");
+        var elBtnPwClear = document.getElementById("btn-pw-clear");
+        var elBtnPwKeep = document.getElementById("btn-pw-keep");
+        var elPwHint = document.getElementById("pw-hint");
+
+        var elBtnTest = document.getElementById("btn-test");
+        var elProbeBody = document.getElementById("probe-body");
+        var elBtnAdd = document.getElementById("btn-add");
+        var elBtnAddEmpty = document.getElementById("btn-add-empty");
+        var elBtnReset = document.getElementById("btn-reset");
+        var elStatusText = document.getElementById("status-text");
+        var elBtnSave = document.getElementById("btn-save");
+
+        function setDirty(flag) {
+          state.dirty = !!flag;
+          if (flag) state.editRevision += 1;
+          elDirtyPill.classList.toggle("visible", state.dirty);
+          elBtnReset.style.display = state.dirty ? "" : "none";
+        }
+
+        function syncInteractiveLock() {
+          var locked = state.saving;
+          elKeepLocal.disabled = locked;
+          elBtnAdd.disabled = locked || state.adding;
+          elBtnAddEmpty.disabled = locked || state.adding;
+          elBtnReset.disabled = locked;
+          var inputs = [
+            elLabel, elId, elSshTarget, elSshPort, elLocalPort,
+            elRemoteHost, elRemotePort, elPwEnv, elPw,
+            elBtnPwClear, elBtnPwKeep,
+          ];
+          inputs.forEach(function (el) {
+            if (el) el.disabled = locked;
+          });
+          document.querySelectorAll(".alias-chip").forEach(function (el) {
+            el.disabled = locked;
+          });
+          document.querySelectorAll(".card-actions .mini-btn").forEach(function (el) {
+            if (locked) {
+              el.disabled = true;
+            }
+          });
+          if (!locked) {
+            renderHostList();
+          }
+        }
+
+        function setStatus(msg, kind) {
+          elStatusText.textContent = msg || "";
+          elStatusText.className = "status-text" + (kind ? " " + kind : "");
+        }
+
+        function mapLoadedHost(h) {
+          return {
+            isExisting: true,
+            originalId: h.id,
+            originalLocalPort: h.localPort,
+            id: h.id,
+            idTouched: true,
+            label: h.label || h.id,
+            sshTarget: h.sshTarget || "",
+            sshPort: h.sshPort ? String(h.sshPort) : "",
+            localPort: String(h.localPort),
+            remoteHost: h.remoteHost || "127.0.0.1",
+            remotePort: String(h.remotePort || 30141),
+            passwordEnv: h.passwordEnv || "",
+            hasSavedPassword: !!h.hasPassword,
+            passwordFromEnv: !!h.passwordFromEnv,
+            passwordMode: h.hasPassword ? "keep" : "clear",
+            passwordInput: "",
+            probeReport: null,
+          };
+        }
+
+        function applyManagerState(snap, preserveSelectionId) {
+          state.configPath = snap.configPath || "";
+          state.activeTarget = snap.activeTarget || "local";
+          state.keepLocalRunning = snap.keepLocalRunning !== false;
+          state.sshAliases = Array.isArray(snap.sshAliases) ? snap.sshAliases : [];
+          state.hosts = (snap.hosts || []).map(mapLoadedHost);
+
+          elConfigPath.textContent = state.configPath;
+          elConfigPath.title = state.configPath;
+          elKeepLocal.checked = state.keepLocalRunning;
+
+          if (snap.warnings && snap.warnings.length) {
+            elWarnings.textContent = "读取 hosts.json 时跳过或修正了以下内容：\n" + snap.warnings.join("\n");
+            elWarnings.classList.add("visible");
+          } else {
+            elWarnings.textContent = "";
+            elWarnings.classList.remove("visible");
+          }
+
+          renderSshAliases();
+
+          if (state.hosts.length === 0) {
+            state.selectedIndex = -1;
+          } else if (preserveSelectionId) {
+            var idx = state.hosts.findIndex(function (x) { return x.id === preserveSelectionId; });
+            state.selectedIndex = idx >= 0 ? idx : 0;
+          } else {
+            state.selectedIndex = 0;
+          }
+
+          setDirty(false);
+          renderAll();
+        }
+
+        function renderSshAliases() {
+          elAliasesList.textContent = "";
+          elAliasChips.textContent = "";
+          if (!state.sshAliases.length) return;
+
+          var label = document.createElement("span");
+          label.className = "alias-label";
+          label.textContent = "~/.ssh/config 别名：";
+          elAliasChips.appendChild(label);
+
+          state.sshAliases.forEach(function (alias) {
+            var opt = document.createElement("option");
+            opt.value = alias;
+            elAliasesList.appendChild(opt);
+
+            var chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "alias-chip";
+            chip.textContent = alias;
+            chip.addEventListener("click", function () {
+              if (state.saving) return;
+              var cur = currentHost();
+              if (!cur) return;
+              elSshTarget.value = alias;
+              cur.sshTarget = alias;
+              if (!cur.label.trim()) {
+                cur.label = alias;
+                elLabel.value = alias;
+              }
+              maybeAutoSlug(cur);
+              setDirty(true);
+              renderHostList();
+              validateCurrentFields(cur);
+            });
+            elAliasChips.appendChild(chip);
+          });
+        }
+
+        function currentHost() {
+          if (state.selectedIndex < 0 || state.selectedIndex >= state.hosts.length) return null;
+          return state.hosts[state.selectedIndex];
+        }
+
+        function slugifyCandidate(raw) {
+          var s = String(raw || "")
+            .trim()
+            .toLowerCase()
+            .replace(/^[^@]+@/, "")
+            .replace(/[^a-z0-9._-]+/g, "-")
+            .replace(/^-+|-+$/g, "")
+            .slice(0, 56);
+          if (!s || s === "local") return "";
+          return s;
+        }
+
+        function makeUniqueSlug(base, selfHost) {
+          var seed = base || "remote-host";
+          if (seed.toLowerCase() === "local") seed = "remote-local";
+          var candidate = seed;
+          var n = 2;
+          while (
+            state.hosts.some(function (h) {
+              return h !== selfHost && h.id.trim().toLowerCase() === candidate.toLowerCase();
+            })
+          ) {
+            candidate = seed + "-" + n++;
+          }
+          return candidate;
+        }
+
+        function maybeAutoSlug(host) {
+          if (host.isExisting || host.idTouched) return;
+          var base = slugifyCandidate(host.label) || slugifyCandidate(host.sshTarget);
+          host.id = makeUniqueSlug(base, host);
+          elId.value = host.id;
+        }
+
+        function computePasswordBadge(h) {
+          var envName = h.passwordEnv.trim();
+          var envActive = envName && (state.envCache[envName] !== undefined ? state.envCache[envName].isSet : h.passwordFromEnv);
+          if (envActive) {
+            return { cls: "env", text: "环境变量" };
+          }
+          var hasDirect =
+            (h.passwordMode === "keep" && h.hasSavedPassword) ||
+            (h.passwordMode === "set" && h.passwordInput.length > 0);
+          if (hasDirect) {
+            return { cls: "pw", text: "已设口令" };
+          }
+          return { cls: "none", text: "无口令" };
+        }
+
+        function renderHostList() {
+          elListHeading.textContent = "远端主机 (" + state.hosts.length + ")";
+          elHostList.textContent = "";
+
+          if (state.hosts.length === 0) {
+            var empty = document.createElement("div");
+            empty.className = "empty-list";
+            empty.textContent = "暂无远端主机条目。\n点击右上角「+ 新增主机」添加配置。";
+            elHostList.appendChild(empty);
+            return;
+          }
+
+          state.hosts.forEach(function (h, index) {
+            var card = document.createElement("div");
+            card.className = "host-card" + (index === state.selectedIndex ? " selected" : "");
+            card.setAttribute("data-host-id", h.id);
+
+            var top = document.createElement("div");
+            top.className = "card-top";
+
+            var name = document.createElement("div");
+            name.className = "card-name";
+            name.textContent = h.label.trim() || h.id.trim() || "(未命名主机)";
+
+            var badges = document.createElement("div");
+            badges.className = "badges";
+            var effectiveId = h.originalId || h.id;
+            if (state.activeTarget !== "local" && (state.activeTarget === h.id || state.activeTarget === effectiveId)) {
+              var act = document.createElement("span");
+              act.className = "tag active";
+              act.textContent = "当前";
+              badges.appendChild(act);
+            }
+            var pwBadge = computePasswordBadge(h);
+            var pwTag = document.createElement("span");
+            pwTag.className = "tag " + pwBadge.cls;
+            pwTag.textContent = pwBadge.text;
+            badges.appendChild(pwTag);
+
+            top.appendChild(name);
+            top.appendChild(badges);
+
+            var line1 = document.createElement("div");
+            line1.className = "card-line";
+            var sshStr = h.sshTarget.trim() || "(未填 sshTarget)";
+            if (h.sshPort.trim()) sshStr += ":" + h.sshPort.trim();
+            line1.textContent = sshStr;
+
+            var line2 = document.createElement("div");
+            line2.className = "card-line dim";
+            var rHost = h.remoteHost.trim() || "127.0.0.1";
+            var rPort = h.remotePort.trim() || "30141";
+            line2.textContent = "127.0.0.1:" + (h.localPort || "?") + " → " + rHost + ":" + rPort;
+
+            var actions = document.createElement("div");
+            actions.className = "card-actions";
+
+            var btnUp = document.createElement("button");
+            btnUp.type = "button";
+            btnUp.className = "mini-btn";
+            btnUp.textContent = "↑ 上移";
+            btnUp.disabled = state.saving || index === 0;
+            btnUp.addEventListener("click", function (ev) {
+              ev.stopPropagation();
+              if (state.saving) return;
+              moveHost(index, -1);
+            });
+
+            var btnDown = document.createElement("button");
+            btnDown.type = "button";
+            btnDown.className = "mini-btn";
+            btnDown.textContent = "↓ 下移";
+            btnDown.disabled = state.saving || index === state.hosts.length - 1;
+            btnDown.addEventListener("click", function (ev) {
+              ev.stopPropagation();
+              if (state.saving) return;
+              moveHost(index, 1);
+            });
+
+            var btnEdit = document.createElement("button");
+            btnEdit.type = "button";
+            btnEdit.className = "mini-btn";
+            btnEdit.textContent = "编辑";
+            btnEdit.disabled = state.saving;
+            btnEdit.addEventListener("click", function (ev) {
+              ev.stopPropagation();
+              if (state.saving) return;
+              selectHost(index);
+              elLabel.focus();
+            });
+
+            var btnDel = document.createElement("button");
+            btnDel.type = "button";
+            btnDel.className = "mini-btn danger";
+            btnDel.textContent = "删除";
+            btnDel.disabled = state.saving;
+            btnDel.addEventListener("click", function (ev) {
+              ev.stopPropagation();
+              if (state.saving) return;
+              deleteHost(index);
+            });
+
+            actions.appendChild(btnUp);
+            actions.appendChild(btnDown);
+            actions.appendChild(btnEdit);
+            actions.appendChild(btnDel);
+
+            card.appendChild(top);
+            card.appendChild(line1);
+            card.appendChild(line2);
+            card.appendChild(actions);
+
+            card.addEventListener("click", function () {
+              selectHost(index);
+            });
+
+            elHostList.appendChild(card);
+          });
+        }
+
+        function renderEditor() {
+          var h = currentHost();
+          if (!h) {
+            elEditorEmpty.style.display = "flex";
+            elEditorForm.style.display = "none";
+            return;
+          }
+          elEditorEmpty.style.display = "none";
+          elEditorForm.style.display = "block";
+
+          elFormHeading.textContent = h.isExisting
+            ? "编辑主机：" + (h.label.trim() || h.id)
+            : "新增远程主机";
+          elFormMode.textContent = h.isExisting
+            ? "原 ID: " + h.originalId + " · 原端口: " + h.originalLocalPort
+            : "尚未写入 hosts.json";
+
+          elLabel.value = h.label;
+          elId.value = h.id;
+          elSshTarget.value = h.sshTarget;
+          elSshPort.value = h.sshPort;
+          elLocalPort.value = h.localPort;
+          elRemoteHost.value = h.remoteHost;
+          elRemotePort.value = h.remotePort;
+          elPwEnv.value = h.passwordEnv;
+
+          syncPasswordControls(h);
+          validateCurrentFields(h);
+          checkEnvVarLive(h.passwordEnv);
+          renderProbeResult(h.probeReport);
+        }
+
+        function syncPasswordControls(h) {
+          if (h.passwordMode === "keep" && h.hasSavedPassword) {
+            elPw.value = "";
+            elPw.placeholder = "••••••••（保持不变）";
+            elBtnPwClear.style.display = "";
+            elBtnPwKeep.style.display = "none";
+            elPwHint.textContent = "当前将保留 hosts.json 中已保存的口令；输入新内容即替换，或点「清空口令」移除";
+            elPwHint.className = "hint";
+          } else if (h.passwordMode === "clear" && h.hasSavedPassword) {
+            elPw.value = "";
+            elPw.placeholder = "（保存后将清空原有口令）";
+            elBtnPwClear.style.display = "none";
+            elBtnPwKeep.style.display = "";
+            elPwHint.textContent = "已标记为清空原口令；点击「保存并生效」后移除";
+            elPwHint.className = "hint warn";
+          } else {
+            elPw.value = h.passwordInput;
+            elPw.placeholder = "留空表示不设直接口令";
+            elBtnPwClear.style.display = h.passwordInput.length > 0 ? "" : "none";
+            elBtnPwKeep.style.display = h.hasSavedPassword ? "" : "none";
+            elPwHint.textContent = h.passwordInput.length > 0
+              ? "保存时将写入新输入的直接口令"
+              : "若远端未设 PI_WEB_PASSWORD 或已通过环境变量提供口令，此处可留空";
+            elPwHint.className = "hint";
+          }
+        }
+
+        function validateHostEntry(h) {
+          var id = h.id.trim();
+          if (!id) return "主机 ID 不能为空";
+          if (id.toLowerCase() === "local") return "主机 ID 不能为 local（保留给 Windows 本地）";
+          if (id.length > 64 || !/^[A-Za-z0-9._-]+$/.test(id)) {
+            return "主机 ID \"" + id + "\" 仅允许字母、数字与 - _ .（最长 64）";
+          }
+          var dupId = state.hosts.some(function (other) {
+            return other !== h && other.id.trim() === id;
+          });
+          if (dupId) return "主机 ID \"" + id + "\" 与列表中其他主机重复";
+
+          var ssh = h.sshTarget.trim();
+          if (!ssh) return "主机「" + (h.label.trim() || id) + "」缺少 SSH 目标 (sshTarget)";
+          if (ssh.startsWith("-") || /\s/.test(ssh)) {
+            return "SSH 目标不能以 - 开头，也不能包含空格";
+          }
+
+          if (h.sshPort.trim()) {
+            var sp = Number(h.sshPort.trim());
+            if (!Number.isInteger(sp) || sp < 1 || sp > 65535) {
+              return "SSH 端口必须是 1–65535 之间的整数";
+            }
+          }
+
+          var lp = Number(h.localPort);
+          if (!Number.isInteger(lp) || lp < 45000 || lp > 48999) {
+            return "本机隧道端口必须在 45000–48999 之间";
+          }
+          var dupPort = state.hosts.find(function (other) {
+            return other !== h && Number(other.localPort) === lp;
+          });
+          if (dupPort) {
+            return "本机隧道端口 " + lp + " 与主机「" + (dupPort.label.trim() || dupPort.id) + "」冲突";
+          }
+
+          var rh = h.remoteHost.trim() || "127.0.0.1";
+          if (rh.startsWith("-") || !/^[A-Za-z0-9._:\[\]-]+$/.test(rh)) {
+            return "远端监听地址 \"" + rh + "\" 格式不合法";
+          }
+
+          var rp = h.remotePort.trim() ? Number(h.remotePort.trim()) : 30141;
+          if (!Number.isInteger(rp) || rp < 1 || rp > 65535) {
+            return "远端端口必须是 1–65535 之间的整数";
+          }
+
+          var env = h.passwordEnv.trim();
+          if (env && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(env)) {
+            return "环境变量名 \"" + env + "\" 不合法（仅限字母、数字与下划线，且不能以数字开头）";
+          }
+          return null;
+        }
+
+        function validateCurrentFields(h) {
+          var id = h.id.trim();
+          if (!id) {
+            elIdHint.textContent = "主机 ID 不能为空";
+            elIdHint.className = "hint err";
+          } else if (id.toLowerCase() === "local") {
+            elIdHint.textContent = "禁止使用保留 ID \"local\"";
+            elIdHint.className = "hint err";
+          } else if (id.length > 64 || !/^[A-Za-z0-9._-]+$/.test(id)) {
+            elIdHint.textContent = "仅允许字母、数字与 - _ .（最长 64）";
+            elIdHint.className = "hint err";
+          } else if (state.hosts.some(function (o) { return o !== h && o.id.trim() === id; })) {
+            elIdHint.textContent = "该 ID 已存在于列表中";
+            elIdHint.className = "hint err";
+          } else {
+            elIdHint.textContent = "仅限字母、数字与 - _ .，禁止为 local";
+            elIdHint.className = "hint";
+          }
+
+          var lp = Number(h.localPort);
+          var conflict = state.hosts.find(function (o) { return o !== h && Number(o.localPort) === lp; });
+          if (!Number.isInteger(lp) || lp < 45000 || lp > 48999) {
+            elPortHint.textContent = "本机端口必须在 45000–48999 范围内";
+            elPortHint.className = "hint err";
+          } else if (conflict) {
+            elPortHint.textContent = "端口与主机「" + (conflict.label.trim() || conflict.id) + "」冲突";
+            elPortHint.className = "hint err";
+          } else {
+            elPortHint.textContent = "范围 45000–48999，每台主机固定独立端口";
+            elPortHint.className = "hint";
+          }
+
+          var portChangedOnExisting = h.isExisting && Number.isInteger(lp) && lp !== h.originalLocalPort;
+          elOriginWarn.classList.toggle("visible", portChangedOnExisting);
+        }
+
+        var envCheckTimer = null;
+        function checkEnvVarLive(rawName) {
+          var name = String(rawName || "").trim();
+          if (envCheckTimer) clearTimeout(envCheckTimer);
+          if (!name) {
+            elEnvHint.textContent = "推荐将口令存于系统用户环境变量（优先于直接口令）";
+            elEnvHint.className = "hint";
+            return;
+          }
+          if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+            elEnvHint.textContent = "变量名格式不合法（仅允许字母、数字与下划线，不能以数字开头）";
+            elEnvHint.className = "hint err";
+            return;
+          }
+          envCheckTimer = setTimeout(function () {
+            invoke("hosts_check_env", { name: name })
+              .then(function (res) {
+                state.envCache[name] = res;
+                var cur = currentHost();
+                if (!cur || cur.passwordEnv.trim() !== name) return;
+                if (!res.valid) {
+                  elEnvHint.textContent = "变量名格式不合法";
+                  elEnvHint.className = "hint err";
+                } else if (res.isSet) {
+                  elEnvHint.textContent = "✓ 当前系统环境中「" + name + "」已设置且非空";
+                  elEnvHint.className = "hint ok";
+                } else {
+                  elEnvHint.textContent = "⚠ 当前进程环境中「" + name + "」未设置或为空（新设用户环境变量后需重启 Pi）";
+                  elEnvHint.className = "hint warn";
+                }
+                renderHostList();
+              })
+              .catch(function () {});
+          }, 80);
+        }
+
+        function renderAll() {
+          renderHostList();
+          renderEditor();
+        }
+
+        function selectHost(index) {
+          state.selectedIndex = index;
+          renderAll();
+        }
+
+        function moveHost(index, delta) {
+          var target = index + delta;
+          if (target < 0 || target >= state.hosts.length) return;
+          var selected = currentHost();
+          var tmp = state.hosts[index];
+          state.hosts[index] = state.hosts[target];
+          state.hosts[target] = tmp;
+          if (selected) {
+            state.selectedIndex = state.hosts.indexOf(selected);
+          }
+          setDirty(true);
+          renderAll();
+        }
+
+        function deleteHost(index) {
+          if (state.saving || index < 0 || index >= state.hosts.length) return;
+          state.hosts.splice(index, 1);
+          if (state.hosts.length === 0) {
+            state.selectedIndex = -1;
+          } else if (state.selectedIndex >= state.hosts.length) {
+            state.selectedIndex = state.hosts.length - 1;
+          }
+          setDirty(true);
+          setStatus("已从列表移除，点击「保存并生效」后写入配置", "");
+          renderAll();
+        }
+
+        function addNewHost() {
+          if (state.adding || state.saving) return;
+          var usedPorts = state.hosts
+            .map(function (h) { return Number(h.localPort); })
+            .filter(function (n) { return Number.isInteger(n) && n >= 45000 && n <= 48999; });
+
+          state.adding = true;
+          elBtnAdd.disabled = true;
+          elBtnAddEmpty.disabled = true;
+
+          invoke("hosts_suggest_port", { usedPorts: usedPorts })
+            .then(function (port) {
+              if (state.saving) return;
+              var newId = makeUniqueSlug("host-1", null);
+              state.hosts.push({
+                isExisting: false,
+                originalId: null,
+                originalLocalPort: port,
+                id: newId,
+                idTouched: false,
+                label: "",
+                sshTarget: "",
+                sshPort: "",
+                localPort: String(port),
+                remoteHost: "127.0.0.1",
+                remotePort: "30141",
+                passwordEnv: "",
+                hasSavedPassword: false,
+                passwordFromEnv: false,
+                passwordMode: "clear",
+                passwordInput: "",
+                probeReport: null,
+              });
+              state.selectedIndex = state.hosts.length - 1;
+              setDirty(true);
+              renderAll();
+              elLabel.focus();
+            })
+            .catch(function (e) {
+              var msg = (e && e.message) ? e.message : String(e);
+              setStatus("无法分配本机隧道端口：" + msg, "err");
+            })
+            .finally(function () {
+              state.adding = false;
+              elBtnAdd.disabled = state.saving;
+              elBtnAddEmpty.disabled = state.saving;
+            });
+        }
+
+        function toBackendDraft(h) {
+          var pwSpec;
+          if (h.passwordMode === "keep" && h.hasSavedPassword) {
+            pwSpec = { mode: "keep", fromId: h.originalId || h.id.trim() };
+          } else if (h.passwordMode === "set" && h.passwordInput.length > 0) {
+            pwSpec = { mode: "set", value: h.passwordInput };
+          } else {
+            pwSpec = { mode: "clear" };
+          }
+          var sshPortVal = h.sshPort.trim() ? Number(h.sshPort.trim()) : null;
+          var remotePortVal = h.remotePort.trim() ? Number(h.remotePort.trim()) : 30141;
+          return {
+            id: h.id.trim(),
+            originalId: h.originalId || null,
+            label: h.label.trim() || h.id.trim(),
+            sshTarget: h.sshTarget.trim(),
+            sshPort: sshPortVal,
+            localPort: Number(h.localPort),
+            remoteHost: h.remoteHost.trim() || "127.0.0.1",
+            remotePort: remotePortVal,
+            passwordEnv: h.passwordEnv.trim() || null,
+            password: pwSpec,
+          };
+        }
+
+        function renderProbeResult(report) {
+          elProbeBody.textContent = "";
+          if (!report) {
+            elProbeBody.className = "hint";
+            elProbeBody.textContent =
+              "点击「测试连接」将使用系统 OpenSSH 建立临时隧道，依次验证 SSH 连通性、远端 pi-web 响应与口令鉴权。";
+            return;
+          }
+          elProbeBody.className = "";
+
+          var summaryLine = document.createElement("div");
+          summaryLine.className = "hint " + (report.ok ? "ok" : "err");
+          summaryLine.style.marginBottom = "8px";
+          summaryLine.textContent =
+            (report.ok ? "✓ 连接测试通过" : "✕ 连接测试未通过") +
+            "（总耗时 " + report.totalMs + " ms" +
+            (report.borrowedPort ? " · 临时借用端口 " + report.probePort : " · 端口 " + report.probePort) +
+            "）";
+          elProbeBody.appendChild(summaryLine);
+
+          var stepsWrap = document.createElement("div");
+          stepsWrap.className = "probe-steps";
+          (report.steps || []).forEach(function (s) {
+            var item = document.createElement("div");
+            item.className = "step-item " + (s.status || "skipped");
+
+            var top = document.createElement("div");
+            top.className = "step-top";
+
+            var name = document.createElement("span");
+            name.className = "step-name";
+            var badge = s.status === "pass" ? "✓ " : s.status === "fail" ? "✕ " : "— ";
+            name.textContent = badge + s.title;
+
+            var meta = document.createElement("span");
+            meta.className = "step-meta";
+            meta.textContent = s.status === "skipped" ? "跳过" : s.durationMs + " ms";
+
+            top.appendChild(name);
+            top.appendChild(meta);
+            item.appendChild(top);
+
+            var sum = document.createElement("div");
+            sum.className = "step-summary";
+            sum.textContent = s.summary || "";
+            item.appendChild(sum);
+
+            if (s.detail) {
+              var det = document.createElement("div");
+              det.className = "step-detail";
+              det.textContent = s.detail;
+              item.appendChild(det);
+            }
+
+            stepsWrap.appendChild(item);
+          });
+          elProbeBody.appendChild(stepsWrap);
+        }
+
+        function runTestConnection() {
+          var h = currentHost();
+          if (!h || state.testing) return;
+          var err = validateHostEntry(h);
+          if (err) {
+            setStatus(err, "err");
+            return;
+          }
+          state.testing = true;
+          elBtnTest.disabled = true;
+          elBtnTest.textContent = "正在诊断…";
+          elProbeBody.className = "hint";
+          elProbeBody.textContent = "正在通过 OpenSSH 建立测试隧道并探测远端 pi-web，请稍候…";
+          setStatus("正在测试连接「" + (h.label.trim() || h.id) + "」…", "");
+
+          invoke("hosts_test_connection", { draft: toBackendDraft(h) })
+            .then(function (report) {
+              h.probeReport = report;
+              if (currentHost() === h) {
+                renderProbeResult(report);
+              }
+              setStatus(
+                report.ok ? "连接诊断全部通过" : "连接诊断发现问题，请查看步骤详情",
+                report.ok ? "ok" : "err"
+              );
+            })
+            .catch(function (e) {
+              var msg = (e && e.message) ? e.message : String(e);
+              elProbeBody.className = "hint err";
+              elProbeBody.textContent = "测试连接无法执行：" + msg;
+              setStatus(msg, "err");
+            })
+            .finally(function () {
+              state.testing = false;
+              elBtnTest.disabled = false;
+              elBtnTest.textContent = "测试连接";
+            });
+        }
+
+        function saveAll() {
+          if (state.saving || state.adding) return;
+          for (var i = 0; i < state.hosts.length; i++) {
+            var err = validateHostEntry(state.hosts[i]);
+            if (err) {
+              selectHost(i);
+              setStatus(err, "err");
+              return;
+            }
+          }
+
+          var currentSelectedId = currentHost() ? currentHost().id.trim() : null;
+          var drafts = state.hosts.map(toBackendDraft);
+          var savedRevision = state.editRevision;
+
+          state.saving = true;
+          elBtnSave.disabled = true;
+          elBtnSave.textContent = "正在保存…";
+          syncInteractiveLock();
+          setStatus("正在写入 hosts.json 并同步菜单…", "");
+
+          invoke("hosts_save", {
+            keepLocalRunning: !!elKeepLocal.checked,
+            hosts: drafts,
+          })
+            .then(function (freshState) {
+              // Only replace the working copy if no concurrent mutation slipped in.
+              if (state.editRevision === savedRevision) {
+                applyManagerState(freshState, currentSelectedId);
+              } else {
+                state.activeTarget = freshState.activeTarget || state.activeTarget;
+                setDirty(true);
+              }
+              setStatus("✓ 已保存至 hosts.json 并立即生效（主机菜单已同步更新）", "ok");
+            })
+            .catch(function (e) {
+              var msg = (e && e.message) ? e.message : String(e);
+              setStatus("保存失败：" + msg, "err");
+            })
+            .finally(function () {
+              state.saving = false;
+              elBtnSave.disabled = false;
+              elBtnSave.textContent = "保存并生效";
+              syncInteractiveLock();
+            });
+        }
+
+        // --- Event bindings --------------------------------------------------
+        elKeepLocal.addEventListener("change", function () {
+          if (state.saving) return;
+          state.keepLocalRunning = !!elKeepLocal.checked;
+          setDirty(true);
+        });
+
+        elBtnAdd.addEventListener("click", addNewHost);
+        elBtnAddEmpty.addEventListener("click", addNewHost);
+
+        elLabel.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.label = elLabel.value;
+          maybeAutoSlug(h);
+          setDirty(true);
+          renderHostList();
+          validateCurrentFields(h);
+          elFormHeading.textContent = h.isExisting
+            ? "编辑主机：" + (h.label.trim() || h.id)
+            : "新增远程主机";
+        });
+
+        elId.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.idTouched = true;
+          h.id = elId.value;
+          setDirty(true);
+          renderHostList();
+          validateCurrentFields(h);
+        });
+
+        elSshTarget.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.sshTarget = elSshTarget.value;
+          maybeAutoSlug(h);
+          setDirty(true);
+          renderHostList();
+          validateCurrentFields(h);
+        });
+
+        elSshPort.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.sshPort = elSshPort.value;
+          setDirty(true);
+          renderHostList();
+        });
+
+        elLocalPort.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.localPort = elLocalPort.value;
+          setDirty(true);
+          renderHostList();
+          validateCurrentFields(h);
+        });
+
+        elRemoteHost.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.remoteHost = elRemoteHost.value;
+          setDirty(true);
+          renderHostList();
+          validateCurrentFields(h);
+        });
+
+        elRemotePort.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.remotePort = elRemotePort.value;
+          setDirty(true);
+          renderHostList();
+        });
+
+        elPwEnv.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.passwordEnv = elPwEnv.value;
+          setDirty(true);
+          checkEnvVarLive(h.passwordEnv);
+          renderHostList();
+        });
+
+        elPw.addEventListener("input", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.passwordInput = elPw.value;
+          if (h.passwordInput.length > 0) {
+            h.passwordMode = "set";
+          } else if (h.hasSavedPassword) {
+            h.passwordMode = "keep";
+          } else {
+            h.passwordMode = "clear";
+          }
+          setDirty(true);
+          syncPasswordControls(h);
+          renderHostList();
+        });
+
+        elBtnPwClear.addEventListener("click", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h) return;
+          h.passwordInput = "";
+          h.passwordMode = "clear";
+          setDirty(true);
+          syncPasswordControls(h);
+          renderHostList();
+        });
+
+        elBtnPwKeep.addEventListener("click", function () {
+          if (state.saving) return;
+          var h = currentHost();
+          if (!h || !h.hasSavedPassword) return;
+          h.passwordInput = "";
+          h.passwordMode = "keep";
+          setDirty(true);
+          syncPasswordControls(h);
+          renderHostList();
+        });
+
+        elBtnTest.addEventListener("click", runTestConnection);
+        elBtnSave.addEventListener("click", saveAll);
+
+        document.getElementById("btn-open-dir").addEventListener("click", function () {
+          invoke("hosts_open_dir").catch(function () {});
+        });
+
+        elBtnReset.addEventListener("click", function () {
+          if (state.saving) return;
+          var startRev = state.editRevision;
+          var selectedId = currentHost() ? (currentHost().originalId || currentHost().id) : null;
+          invoke("hosts_get_state")
+            .then(function (snap) {
+              if (state.saving || state.editRevision !== startRev) return;
+              applyManagerState(snap, selectedId);
+              setStatus("已重新载入磁盘上的 hosts.json", "");
+            })
+            .catch(function (e) {
+              setStatus("重新读取失败：" + String((e && e.message) || e), "err");
+            });
+        });
+
+        document.getElementById("btn-close").addEventListener("click", function () {
+          invoke("hosts_close_window").catch(function () {
+            window.close();
+          });
+        });
+
+        window.addEventListener("keydown", function (ev) {
+          if ((ev.ctrlKey || ev.metaKey) && (ev.key === "s" || ev.key === "S")) {
+            ev.preventDefault();
+            saveAll();
+          } else if (ev.key === "Escape") {
+            invoke("hosts_close_window").catch(function () {});
+          }
+        });
+
+        // Initial load
+        invoke("hosts_get_state")
+          .then(function (snap) {
+            applyManagerState(snap, null);
+          })
+          .catch(function (e) {
+            setStatus("读取主机配置失败：" + String((e && e.message) || e), "err");
+          });
+      })();
+    </script>
+  </body>
+</html>

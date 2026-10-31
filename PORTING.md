@@ -443,6 +443,32 @@ pi-web 的侧边栏挂载时就探测 `window.piDesktop.selectDirectory`。远�
   - **正常关窗**与 **`Stop-Process -Force` 强杀**两种场景下，子进程 `ssh.exe` 均立即退出（`alive=False`），`45002` 端口立即释放（`listening=False`）。
 - **真机冒烟顺手抓到并修掉的一个首帧竞态**：本地模式首启要跑 ~1.5s 的 guard 预检，首帧 `index.html` 早就加载完并捕获了 `local_base`；而启动即连远端且瞬间失败（如 `45002` 已被占用，1ms 内报错）时，`show_error -> show_local("error.html")` 早于首帧 `on_page_load`（约 30ms），导致跳转曾被静默丢弃。现 `show_local` 在非 `index.html` 且 `local_base` 尚未就绪时短暂轮询等待，实测端口预占场景能稳定落到 `Pi — Arch Linux (130) 连接失败` 错误页。
 - **两台远端常驻服务已真机部署并验证**：`130`（`systemd --user` + `linger`，仅监听 `127.0.0.1:30141`）与 `mac`（`launchd` LaunchAgent，仅监听 `127.0.0.1:30141`）均已上线，从 Windows 经 `45002` / `45001` 隧道实测 `POST /api/web-auth -> 200`、`GET /api/sessions -> 200`。
+
+### 应用内远程主机管理器（Host Manager UI）与窗口级 ACL 隔离
+
+在不触碰 `capabilities/remote.json` 一字的前提下，新增可视化管理窗口 `hosts-manager`（菜单 `主机(&H) → 管理远程主机…`，快捷键 `Ctrl+Shift+H`，前端为打包在 `dist/hosts.html` 的零打包器原生 Metro 深色页面）：
+
+1. **严格的窗口级 ACL 隔离**：
+   - `capabilities/remote.json` 保持原样（仅 `main` 窗口 + `http://127.0.0.1:*` + 原有 3 个 `allow-*` 命令）；
+   - 新增的 7 个管理命令（`hosts_get_state`、`hosts_suggest_port`、`hosts_check_env`、`hosts_test_connection`、`hosts_save`、`hosts_open_dir`、`hosts_close_window`）在 `build.rs` 的 `AppManifest::commands` 中声明，并通过 `capabilities/hosts-manager.json` **仅授权给 `"windows": ["hosts-manager"]`（无 `remote.urls`）**，且 Rust 侧二次校验 `window.label() == "hosts-manager"`；
+   - `hosts-manager` 不注入 `preload.js`，携带 `<meta name="piwd-shell" content="1" />` 与 `default-src 'none'` CSP，`on_navigation` / `on_new_window` 拒绝一切非外壳静态页跳转。
+2. **口令最小暴露与无损保留**：
+   - `hosts_get_state` 返回 `HostSummary` 时只含 `hasPassword: bool`、`passwordFromEnv: bool` 与环境变量**名称**，绝不向前端回传明文 `password` 或环境变量实际值；
+   - 编辑已有主机时密码框默认处于 `keep` 占位态（`••••••••（保持不变）`），后端在写盘与「测试连接」时直接从原文件按 `originalId` 接续旧口令，即使顺手改了主机 `id` 也不会丢口令；仅在主动输入新口令（`set`）或点「清空口令」（`clear`）时覆盖。
+3. **非破坏性三步连接诊断与端口借用**：
+   - 复用 `C:\Windows\System32\OpenSSH\ssh.exe` + `ProcessJob` 建立临时隧道，分步测量并返回 `1. SSH 隧道建立`、`2. 远端 pi-web 响应`、`3. 口令鉴权验证`（明确区分「远端设了口令但未填」「口令错误」「鉴权通过」「无需口令」）；
+   - 若表单 `localPort` 正被本应用当前激活会话占用，自动在 `45000..=48999` 借用空闲临时端口探活，`Drop` 守卫确保任意退出路径均立即终止 `ssh.exe` 并等待端口释放，不打断正在使用的远端会话。
+4. **菜单重挂细节（`app.set_menu` 副作用）**：
+   - 与前文 `autoHideMenuBar` 踩到的规律一致：每次保存触发 `app::reload_hosts` → `menu::install` 调 `app.set_menu(menu)` 时，Tauri 会把菜单栏重新挂到进程内**所有**已打开窗口上。因此在 `hosts-manager` 创建后及 `menu::install` 执行 `app.set_menu` 后均显式对 `hosts-manager` 调 `hide_menu()`，实测热更新菜单后子窗口仍保持无菜单栏。
+5. **跟进上游 `@agegr/pi-web` `0.13.0`（含 `pi-coding-agent` `1.4.0`）**：
+   - `scripts/seed-runtime.js`（`npm run seed`）优先使用 `vendor/node` 自动初始化并拉取最新 `@agegr/pi-web@latest`，`runtime-guard` 预检一次通过；
+   - `pi-web` 0.13+ 新增了 `/api/app-update`（直接请求 `registry.npmjs.org` 提示全局 CLI 更新），内嵌 `Server::start` 现传入 `PI_WEB_SKIP_VERSION_CHECK=1` 与 `PI_WEB_APP_NAME=Pi`，将更新检查权完全收归外壳自身的 staging 原子自更新状态机。
+6. **真机 CDP + Win32 实测结果**：
+   - 主窗口 `http://127.0.0.1:35566/`（`pi-web` `0.13.0`）中通过 CDP 逐一调用 7 个 `hosts_*` 命令，全部被 Tauri ACL 拦截（`... not allowed on window "main", webview "main", URL: http://127.0.0.1:35566/`），原有 `theme_changed` 正常放行；
+   - 通过 Win32 `WM_COMMAND` 点击 `主机(&H) → 管理远程主机…\tCtrl+Shift+H` 打开 `hosts-manager`，二次点击聚焦已有窗口不重复创建（窗口数保持 `1`，`GetMenu(hwnd) == 0`）；
+   - 实测读取主机列表与 13 个 `~/.ssh/config` 别名无任何明文口令字段；修改已有主机 `localPort` 实时弹出黄色 Origin 重置提示；
+   - 对真实远端主机点「测试连接」：空闲态 `45001` 三步全绿（总耗时 `534ms`：隧道 `399ms` / HTTP 307 `30ms` / `/api/web-auth` `99ms`）；故意填错口令精准返回 `口令错误`（HTTP 401）；切到远端占住 `45001` 后再测同一主机，自动借用临时端口 `45000` 三步全绿且不中断当前会话；
+   - 新增主机自动分配最小空闲端口 `45000` 与 slug，保存为无 BOM UTF-8 JSON 后，主窗口 Win32 `主机(&H)` 菜单立即热更新出新主机项，未改口令框二次编辑保存后磁盘原口令完好保留。
 ---
 
 ## 验收状态

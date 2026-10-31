@@ -27,7 +27,7 @@ use crate::job::ProcessJob;
 use crate::log_dbg;
 use crate::paths::Paths;
 use crate::proc::NoConsole;
-use crate::remote::{self, RemoteSession};
+use crate::remote::{self, ProbeGate, RemoteSession};
 use crate::server::{self, Server};
 
 pub const MAIN_WINDOW: &str = "main";
@@ -106,6 +106,12 @@ pub struct NoticeAction {
     pub label: &'static str,
 }
 
+#[derive(Default)]
+struct PortCoordination {
+    connecting_port: Option<u16>,
+    probe: Option<Arc<ProbeGate>>,
+}
+
 pub struct AppState {
     pub paths: Paths,
     pub job: ProcessJob,
@@ -120,8 +126,16 @@ pub struct AppState {
     /// kept on a failed connect, so 重连当前远端 knows what to retry.
     target: Mutex<String>,
     hosts: Mutex<HostsFile>,
-    /// Serialises switches, reconnects and updates against each other.
+    /// Serialises switches, reconnects, reloads and Host Manager saves against
+    /// each other so target transitions and `hosts.json` updates form one
+    /// linearizable sequence.
     switch_lock: Mutex<()>,
+    /// Monotonic counter bumped under `switch_lock` whenever the target or
+    /// host configuration changes, so deferred reconnect tasks abort if a
+    /// newer user action superseded them.
+    switch_epoch: AtomicU64,
+    pub probe_lock: Mutex<()>,
+    port_coord: Mutex<PortCoordination>,
     /// The boot-time recover/migrate/verify sequence has run. When the app
     /// boots straight into a remote host it is deferred until the first switch
     /// to local, and it must run exactly once (runtime_dir() caches).
@@ -171,6 +185,9 @@ impl AppState {
             server: Mutex::new(None),
             remote: Mutex::new(None),
             switch_lock: Mutex::new(()),
+            switch_epoch: AtomicU64::new(1),
+            probe_lock: Mutex::new(()),
+            port_coord: Mutex::new(PortCoordination::default()),
             local_prepared: AtomicBool::new(false),
             installed_cookie: Mutex::new(None),
             menu: Mutex::new(None),
@@ -213,6 +230,53 @@ impl AppState {
 
     fn set_target(&self, id: &str) {
         *self.target.lock().unwrap_or_else(|e| e.into_inner()) = id.to_string();
+    }
+
+    fn bump_switch_epoch(&self) -> u64 {
+        self.switch_epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn reserve_probe_gate(&self, requested_port: u16) -> Result<(Arc<ProbeGate>, bool), String> {
+        let active_remote_port = self.remote().map(|r| r.host.local_port);
+        let configured_ports: Vec<u16> = self.hosts().hosts.iter().map(|h| h.local_port).collect();
+        let mut coord = self.port_coord.lock().unwrap_or_else(|e| e.into_inner());
+        let held = active_remote_port == Some(requested_port) || coord.connecting_port == Some(requested_port);
+        let (probe_port, borrowed) = if held {
+            let mut used = configured_ports;
+            used.push(requested_port);
+            if let Some(cp) = coord.connecting_port { used.push(cp); }
+            if let Some(ap) = active_remote_port { used.push(ap); }
+            let temp = hosts::next_available_local_port(&used, server::is_free)
+                .ok_or_else(|| "45000-48999 中无可用临时端口用于连接测试".to_string())?;
+            (temp, true)
+        } else {
+            (requested_port, false)
+        };
+        let gate = Arc::new(ProbeGate::new(probe_port));
+        coord.probe = Some(gate.clone());
+        Ok((gate, borrowed))
+    }
+
+    pub fn clear_probe_gate(&self, gate: &Arc<ProbeGate>) {
+        let mut coord = self.port_coord.lock().unwrap_or_else(|e| e.into_inner());
+        if coord.probe.as_ref().map(|g| Arc::ptr_eq(g, gate)).unwrap_or(false) { coord.probe = None; }
+    }
+
+    fn begin_session_connect(&self, port: u16) {
+        let conflicting = {
+            let mut coord = self.port_coord.lock().unwrap_or_else(|e| e.into_inner());
+            coord.connecting_port = Some(port);
+            if coord.probe.as_ref().map(|g| g.port()) == Some(port) { coord.probe.take() } else { None }
+        };
+        if let Some(gate) = conflicting {
+            log_dbg!("preempting in-flight diagnostic probe on port {port} for real switch");
+            gate.preempt_and_stop();
+        }
+    }
+
+    fn end_session_connect(&self, port: u16) {
+        let mut coord = self.port_coord.lock().unwrap_or_else(|e| e.into_inner());
+        if coord.connecting_port == Some(port) { coord.connecting_port = None; }
     }
 
     pub fn hosts(&self) -> HostsFile {
@@ -329,6 +393,26 @@ impl AppState {
             }
         }
         false
+    }
+
+    /// Stricter variant for `hosts-manager`: only the shell's own bundled
+    /// pages are allowed, never a local or tunnelled pi-web backend port.
+    pub fn is_shell_asset_url(&self, url: &url::Url) -> bool {
+        if url.as_str() == "about:blank"
+            || url.scheme() == "tauri"
+            || url.host_str() == Some("tauri.localhost")
+        {
+            return true;
+        }
+        if is_backend_url(url) {
+            return false;
+        }
+        self.local_base
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|base| url.origin() == base.origin())
+            .unwrap_or(false)
     }
 }
 
@@ -1268,8 +1352,18 @@ pub fn kill_remote(app: &AppHandle) {
     }
 }
 
-/// Stop everything this shell spawned. Used on exit.
+struct ConnectingPortGuard<'a> { state: &'a AppState, port: u16 }
+impl<'a> ConnectingPortGuard<'a> {
+    fn enter(state: &'a AppState, port: u16) -> Self { state.begin_session_connect(port); Self { state, port } }
+}
+impl Drop for ConnectingPortGuard<'_> {
+    fn drop(&mut self) { self.state.end_session_connect(self.port); }
+}
+
 pub fn kill_all(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let probe = state.port_coord.lock().unwrap_or_else(|e| e.into_inner()).probe.take();
+    if let Some(gate) = probe { gate.preempt_and_stop(); }
     kill_remote(app);
     kill_server(app);
 }
@@ -1284,6 +1378,8 @@ fn connect_remote(app: &AppHandle, id: &str) -> Result<(), SwitchError> {
             String::new(),
         ));
     };
+    let _connecting = ConnectingPortGuard::enter(&state, host.local_port);
+
     // The "connecting" page, so the previous host's UI is never left on
     // screen — and clickable — while this one comes up.
     show_local(app, "index.html");
@@ -1312,27 +1408,30 @@ fn connect_remote(app: &AppHandle, id: &str) -> Result<(), SwitchError> {
             return Err((e, log));
         }
     };
-    match session.login() {
-        Ok(true) => log_dbg!("remote[{}]: authenticated", host.id),
-        Ok(false) if auth_required => {
-            let log = session.log_tail(4000);
-            session.stop();
-            return Err((
-                format!(
-                    "远端「{}」的 pi-web 设了口令，但 hosts.json 里没有配置。\n\n\
-                     请在该主机条目里设置 passwordEnv（推荐，指向一个用户环境变量）或 password，\
-                     然后用「主机 → 重新读取 hosts.json」。",
-                    host.label
-                ),
-                log,
-            ));
+    if auth_required {
+        match session.login() {
+            Ok(true) => log_dbg!("remote[{}]: authenticated", host.id),
+            Ok(false) => {
+                let log = session.log_tail(4000);
+                session.stop();
+                return Err((
+                    format!(
+                        "远端「{}」的 pi-web 设了口令，但 hosts.json 里没有配置。\n\n\
+                         请在该主机条目里设置 passwordEnv（推荐，指向一个用户环境变量）或 password，\
+                         然后用「主机 → 管理远程主机…」保存或重新读取配置。",
+                        host.label
+                    ),
+                    log,
+                ));
+            }
+            Err(e) => {
+                let log = session.log_tail(4000);
+                session.stop();
+                return Err((e, log));
+            }
         }
-        Ok(false) => log_dbg!("remote[{}]: no password configured or required", host.id),
-        Err(e) => {
-            let log = session.log_tail(4000);
-            session.stop();
-            return Err((e, log));
-        }
+    } else {
+        log_dbg!("remote[{}]: remote requires no password", host.id);
     }
 
     *state.remote.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(session));
@@ -1395,6 +1494,11 @@ fn on_remote_exit(app: &AppHandle, serial: u64, code: Option<i32>, log: String) 
 pub fn switch_to(app: &AppHandle, id: &str) {
     let state = app.state::<AppState>();
     let _switch = state.switch_lock.lock().unwrap_or_else(|e| e.into_inner());
+    switch_to_locked(app, id);
+}
+
+fn switch_to_locked(app: &AppHandle, id: &str) {
+    let state = app.state::<AppState>();
     let previous = state.target();
     if previous == id && state.active_backend().is_some() {
         log_dbg!("switch: already on {id}");
@@ -1407,6 +1511,7 @@ pub fn switch_to(app: &AppHandle, id: &str) {
         return;
     }
     log_dbg!("switch: {previous} -> {id}");
+    state.bump_switch_epoch();
     state.set_target(id);
     sync_title(app);
     menu_sync(app);
@@ -1460,6 +1565,12 @@ fn switch_to_local(app: &AppHandle) -> Result<(), SwitchError> {
 pub fn restart_current(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _switch = state.switch_lock.lock().unwrap_or_else(|e| e.into_inner());
+    restart_current_locked(app)
+}
+
+fn restart_current_locked(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    state.bump_switch_epoch();
     let target = state.target();
     let result = if target == LOCAL_ID {
         prepare_local_runtime(app).and_then(|()| start_or_restart_server(app))
@@ -1474,15 +1585,18 @@ pub fn restart_current(app: &AppHandle) -> Result<(), String> {
     result
 }
 
-/// 「重新读取 hosts.json」: reload the list and rebuild the menu. When the
-/// current remote host disappeared or its connection settings changed, fall
-/// back to / reconnect accordingly.
+/// 「重新读取 hosts.json」: reload the list and rebuild the menu under
+/// `switch_lock`. When the current remote host disappeared or its settings
+/// diverged from the live tunnel, fall back to / reconnect accordingly.
 pub fn reload_hosts(app: &AppHandle) {
     let state = app.state::<AppState>();
+    let _switch = state.switch_lock.lock().unwrap_or_else(|e| e.into_inner());
+    state.bump_switch_epoch();
+
     let fresh = hosts::load(state.paths.user_data_dir());
     let warnings = fresh.warnings.clone();
+    let keep_local = fresh.keep_local_running;
     let target = state.target();
-    let old_host = state.hosts().find(&target).cloned();
     let new_host = fresh.find(&target).cloned();
     *state.hosts.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
     crate::menu::rebuild(app);
@@ -1500,19 +1614,124 @@ pub fn reload_hosts(app: &AppHandle) {
     }
 
     if target == LOCAL_ID {
+        if state.server().is_none() { switch_to_locked(app, LOCAL_ID); }
         return;
     }
+
     match new_host {
         None => {
             log_dbg!("hosts: current host {target} is gone — back to local");
-            switch_to(app, LOCAL_ID);
+            switch_to_locked(app, LOCAL_ID);
         }
-        Some(h) if Some(&h) != old_host.as_ref() => {
-            log_dbg!("hosts: settings for {target} changed — reconnecting");
-            let _ = restart_current(app);
+        Some(h) => {
+            if !keep_local && state.server().is_some() {
+                log_dbg!("hosts: keepLocalRunning=false — stopping background embedded server");
+                state.restarting.store(true, Ordering::SeqCst);
+                kill_server(app);
+                state.restarting.store(false, Ordering::SeqCst);
+            }
+            let live_matches = state.remote().map(|r| r.host == h).unwrap_or(false);
+            if !live_matches {
+                log_dbg!("hosts: active remote {target} changed or is disconnected — reconnecting");
+                let _ = restart_current_locked(app);
+            }
         }
-        Some(_) => {}
     }
+}
+
+/// Atomic Host Manager save + hot-reload transaction.
+///
+/// Holds `switch_lock` across reading `target`, writing `hosts.json`, updating
+/// `AppState`, rebuilding the menu, and tearing down any invalidated tunnel or
+/// background local server — so a concurrent menu switch can never clobber the
+/// saved file via `save_active`, and a renamed/deleted active host never leaves
+/// `RemoteSession.host.id` out of sync with `target`. Any slow network
+/// reconnect runs afterwards in an epoch-checked worker under `switch_lock`.
+pub fn save_and_reload_hosts(
+    app: &AppHandle,
+    keep_local_running: bool,
+    drafts: &[hosts::HostDraft],
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let _switch = state.switch_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    let previous_target = state.target();
+    let resolved_active = hosts::save_config(
+        state.paths.user_data_dir(),
+        keep_local_running,
+        drafts,
+        &previous_target,
+    )?;
+
+    let fresh = hosts::load(state.paths.user_data_dir());
+    let new_host = fresh.find(&resolved_active).cloned();
+    *state.hosts.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
+
+    state.set_target(&resolved_active);
+    let epoch = state.bump_switch_epoch();
+
+    let mut deferred_action: Option<String> = None;
+
+    if resolved_active == LOCAL_ID {
+        if previous_target != LOCAL_ID {
+            log_dbg!("hosts_save: active remote {previous_target} deleted — switching back to local");
+            kill_remote(app);
+            if state.server().is_some() { show_pi_web(app); }
+        }
+        if state.server().is_none() {
+            show_local(app, "index.html");
+            deferred_action = Some(LOCAL_ID.to_owned());
+        }
+    } else {
+        if !keep_local_running && state.server().is_some() {
+            log_dbg!("hosts_save: keepLocalRunning=false — stopping background embedded server");
+            state.restarting.store(true, Ordering::SeqCst);
+            kill_server(app);
+            state.restarting.store(false, Ordering::SeqCst);
+        }
+        // Compare against the LIVE tunnel's `HostConfig` (including its `id`),
+        // so renaming `a -> b` with identical connection parameters still
+        // rebuilds the session under the new identity `b`.
+        let live_matches = new_host
+            .as_ref()
+            .and_then(|h| state.remote().map(|r| &r.host == h))
+            .unwrap_or(false);
+        if !live_matches {
+            log_dbg!(
+                "hosts_save: active remote {resolved_active} changed (was {previous_target}) — scheduling reconnect"
+            );
+            kill_remote(app);
+            show_local(app, "index.html");
+            deferred_action = Some(resolved_active.clone());
+        }
+    }
+
+    crate::menu::rebuild(app);
+    sync_title(app);
+
+    if let Some(goal) = deferred_action {
+        let app_bg = app.clone();
+        std::thread::spawn(move || {
+            let st = app_bg.state::<AppState>();
+            let _sw = st.switch_lock.lock().unwrap_or_else(|e| e.into_inner());
+            if st.switch_epoch.load(Ordering::SeqCst) != epoch {
+                log_dbg!("hosts_save deferred connect to {goal} superseded by newer switch");
+                return;
+            }
+            let res: Result<(), SwitchError> = if goal == LOCAL_ID {
+                switch_to_local(&app_bg)
+            } else {
+                connect_remote(&app_bg, &goal)
+            };
+            if let Err((message, log)) = res {
+                log_dbg!("hosts_save deferred connect to {goal} FAILED: {message}");
+                show_error(&app_bg, &message, &log);
+            }
+            menu_sync(&app_bg);
+        });
+    }
+
+    Ok(())
 }
 
 /// Push the current state into the menu: the tick, the remote-only labels,

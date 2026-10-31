@@ -32,6 +32,7 @@ pub const ID_RELOAD: &str = "reload";
 pub const ID_RELOAD_BUTTON: &str = "reload-button";
 pub const ID_RESTART_SERVER: &str = "restart-server";
 pub const ID_DEVTOOLS: &str = "devtools";
+pub const ID_MANAGE_HOSTS: &str = "hosts-manage";
 pub const ID_RELOAD_HOSTS: &str = "hosts-reload";
 pub const ID_OPEN_HOSTS_DIR: &str = "hosts-open-dir";
 /// Host items are `host:<id>`; `host:local` is Windows 本地.
@@ -98,6 +99,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)> 
     }
     let host_menu = host_menu
         .separator()
+        .item(
+            &MenuItemBuilder::with_id(ID_MANAGE_HOSTS, "管理远程主机…")
+                .accelerator("CmdOrCtrl+Shift+H")
+                .build(app)?,
+        )
         .item(&MenuItemBuilder::with_id(ID_RELOAD_HOSTS, "重新读取 hosts.json").build(app)?)
         .item(&MenuItemBuilder::with_id(ID_OPEN_HOSTS_DIR, "打开主机配置目录").build(app)?)
         .build()?;
@@ -138,6 +144,11 @@ pub fn build(app: &AppHandle) -> tauri::Result<(Menu<tauri::Wry>, MenuHandles)> 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let (menu, handles) = build(app)?;
     app.set_menu(menu)?;
+    // `app.set_menu` re-attaches the menu bar to every open window; keep the
+    // Host Manager dialog window free of the main window's menu bar.
+    if let Some(hm) = app.get_webview_window(crate::hosts_ui::HOSTS_WINDOW) {
+        let _ = hm.hide_menu();
+    }
     *app.state::<AppState>()
         .menu
         .lock()
@@ -213,6 +224,9 @@ pub fn handle(app: &AppHandle, id: &str) {
                         .blocking_show();
                 }
             });
+        }
+        ID_MANAGE_HOSTS => {
+            crate::hosts_ui::open_or_focus(app);
         }
         ID_RELOAD_HOSTS => {
             let app = app.clone();

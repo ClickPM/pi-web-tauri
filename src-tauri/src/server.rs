@@ -272,6 +272,12 @@ impl Server {
             // the `cmd /c start <url>` browser launch, and the env var also
             // covers a pi-web that ever stops honouring the flag.
             .env("PI_WEB_NO_OPEN", "1")
+            // pi-web 0.13+ added `/api/app-update`, which polls registry.npmjs.org
+            // for global-CLI updates. Updates of the embedded runtime belong to
+            // the shell's atomic staging updater, so silence the in-app check
+            // and align the PWA manifest name with the desktop brand.
+            .env("PI_WEB_SKIP_VERSION_CHECK", "1")
+            .env("PI_WEB_APP_NAME", "Pi")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -609,6 +615,138 @@ pub fn web_auth_login(port: u16, password: &str) -> Result<String, String> {
     Ok(cookie)
 }
 
+/// Outcome of a non-destructive `POST /api/web-auth` diagnostic probe. Never
+/// carries the minted cookie back to the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebAuthProbe {
+    Authenticated,
+    WrongPassword(u16),
+    RateLimited,
+    UnsupportedRoute(u16),
+    Failed(String),
+}
+
+/// Outcome of probing `GET /api/sessions` without credentials after `GET /`
+/// returned 200: distinguishes a genuine passwordless pi-web from a Basic-Auth
+/// older pi-web or an unrelated HTTP server listening on the same port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PiWebApiProbe {
+    OpenPiWeb,
+    AuthRequired,
+    NotPiWeb(String),
+}
+
+/// Verify `password` against `POST /api/web-auth` on `127.0.0.1:<port>` for
+/// the Host Manager's connection test, discarding the resulting session token.
+pub fn probe_web_auth(port: u16, password: &str) -> WebAuthProbe {
+    let body = serde_json::json!({ "password": password }).to_string();
+    let request = format!(
+        "POST /api/web-auth HTTP/1.1\r\n\
+         Host: 127.0.0.1:{}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{}",
+        port,
+        body.len(),
+        body
+    );
+    let response = match http_request(port, &request) {
+        Ok(r) => r,
+        Err(e) => return WebAuthProbe::Failed(e),
+    };
+    let Some(status) = response
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+    else {
+        return WebAuthProbe::Failed("远端未返回合法的 HTTP 状态行".into());
+    };
+    match status {
+        200 => {
+            let has_cookie = response.lines().any(|line| {
+                line.strip_prefix("Set-Cookie:")
+                    .or_else(|| line.strip_prefix("set-cookie:"))
+                    .and_then(|rest| rest.trim().split(';').next())
+                    .map(|pair| pair.trim().starts_with("pi_web_session="))
+                    .unwrap_or(false)
+            });
+            if has_cookie {
+                WebAuthProbe::Authenticated
+            } else {
+                WebAuthProbe::Failed("POST /api/web-auth 返回 200 但未下发 pi_web_session Cookie".into())
+            }
+        }
+        401 | 403 => WebAuthProbe::WrongPassword(status),
+        429 => WebAuthProbe::RateLimited,
+        404 | 405 => WebAuthProbe::UnsupportedRoute(status),
+        other => WebAuthProbe::Failed(format!("POST /api/web-auth 返回 HTTP {other}")),
+    }
+}
+
+/// Check whether an HTTP response head redirects to the same-origin `/login`
+/// route on `http://127.0.0.1:<port>`. Rejects external origins and paths that
+/// merely mention `/login` in a query string (`/other?next=/login`).
+pub fn is_same_origin_login_redirect(head: &str, port: u16) -> bool {
+    let Ok(base) = url::Url::parse(&format!("http://127.0.0.1:{port}/")) else {
+        return false;
+    };
+    head.lines().any(|line| {
+        let Some((name, value)) = line.split_once(':') else {
+            return false;
+        };
+        if !name.trim().eq_ignore_ascii_case("location") {
+            return false;
+        }
+        let loc = value.trim();
+        if loc.is_empty() {
+            return false;
+        }
+        let Ok(resolved) = base.join(loc) else {
+            return false;
+        };
+        resolved.origin() == base.origin() && matches!(resolved.path(), "/login" | "/login/")
+    })
+}
+
+/// Confirm that a `200 OK` on `/` actually comes from pi-web by checking
+/// `GET /api/sessions` on `127.0.0.1:<port>`.
+pub fn probe_pi_web_api(port: u16) -> PiWebApiProbe {
+    let Some(head) = http_head_path(port, "/api/sessions") else {
+        return PiWebApiProbe::NotPiWeb("GET /api/sessions 无响应".into());
+    };
+    let Some(status) = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+    else {
+        return PiWebApiProbe::NotPiWeb("GET /api/sessions 返回了非法状态行".into());
+    };
+    match status {
+        401 => PiWebApiProbe::AuthRequired,
+        301 | 302 | 303 | 307 | 308 => {
+            if is_same_origin_login_redirect(&head, port) {
+                PiWebApiProbe::AuthRequired
+            } else {
+                PiWebApiProbe::NotPiWeb(format!("GET /api/sessions 重定向到非登录页 (HTTP {status})"))
+            }
+        }
+        200 => {
+            let is_json = head.lines().any(|l| {
+                let lower = l.to_ascii_lowercase();
+                lower.starts_with("content-type:") && lower.contains("application/json")
+            });
+            if is_json {
+                PiWebApiProbe::OpenPiWeb
+            } else {
+                PiWebApiProbe::NotPiWeb("GET /api/sessions 返回 200 但并非 JSON 接口（疑似其他网页服务）".into())
+            }
+        }
+        other => PiWebApiProbe::NotPiWeb(format!("GET /api/sessions 返回 HTTP {other}（疑似非 pi-web 服务）")),
+    }
+}
+
 /// One bare HTTP/1.1 GET. Any well-formed status line proves the server is up —
 /// including the 401 a password-protected pi-web answers with.
 fn http_probe(port: u16) -> bool {
@@ -620,11 +758,26 @@ fn http_probe(port: u16) -> bool {
 /// remote that is down still ACCEPTS the connection (ssh.exe owns the local
 /// socket) and then closes it, which lands here as None — exactly right.
 pub fn http_head(port: u16) -> Option<String> {
+    http_head_path(port, "/")
+}
+
+pub fn http_head_path(port: u16, path: &str) -> Option<String> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
+    let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
+    http_head_path_on_stream(stream, port, path)
+}
+
+/// Send `GET /` over an already-connected loopback stream and read the response
+/// head. Used by the connection tester so the TCP connect that proves the SSH
+/// listener is up can immediately carry the HTTP probe without a second socket.
+pub fn http_head_on_stream(stream: TcpStream, port: u16) -> Option<String> {
+    http_head_path_on_stream(stream, port, "/")
+}
+
+fn http_head_path_on_stream(mut stream: TcpStream, port: u16, path: &str) -> Option<String> {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(2500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
-    let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
     let mut head = Vec::with_capacity(512);
     let mut chunk = [0u8; 512];
