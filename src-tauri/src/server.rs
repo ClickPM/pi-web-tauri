@@ -70,7 +70,7 @@ fn write_saved_port(paths: &Paths, port: u16) {
     }
 }
 
-fn is_free(port: u16) -> bool {
+pub fn is_free(port: u16) -> bool {
     TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).is_ok()
 }
 
@@ -214,8 +214,6 @@ pub struct Server {
     in_job: bool,
     /// `pi_web_session=<token>`, as the server minted it. Set by `login()`.
     cookie: Mutex<Option<String>>,
-    /// Flips once the cookie has been installed in the webview for this server.
-    pub auth_injected: AtomicBool,
 }
 
 impl Server {
@@ -327,7 +325,6 @@ impl Server {
             ready,
             in_job,
             cookie: Mutex::new(None),
-            auth_injected: AtomicBool::new(false),
         })
     }
 
@@ -362,41 +359,7 @@ impl Server {
         let Some(password) = self.password.as_deref() else {
             return Ok(None);
         };
-        let body = serde_json::json!({ "password": password }).to_string();
-        let request = format!(
-            "POST /api/web-auth HTTP/1.1\r\n\
-             Host: 127.0.0.1:{}\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n{}",
-            self.port,
-            body.len(),
-            body
-        );
-        let response = http_request(self.port, &request)?;
-
-        let status_ok = response
-            .lines()
-            .next()
-            .map(|l| l.contains(" 200"))
-            .unwrap_or(false);
-        if !status_ok {
-            let status = response.lines().next().unwrap_or("(no status line)");
-            return Err(format!("pi-web rejected the shell's login: {status}"));
-        }
-
-        // Take name=value and drop the attributes; the webview supplies its own
-        // Path and the HttpOnly/Secure flags are meaningless for a JS-set cookie.
-        let cookie = response
-            .lines()
-            .find_map(|line| {
-                let rest = line.strip_prefix("Set-Cookie:").or_else(|| line.strip_prefix("set-cookie:"))?;
-                let pair = rest.trim().split(';').next()?.trim();
-                pair.starts_with("pi_web_session=").then(|| pair.to_string())
-            })
-            .ok_or_else(|| "pi-web accepted the login but set no session cookie".to_string())?;
-
-        log_dbg!("login: session cookie obtained ({} bytes)", cookie.len());
+        let cookie = web_auth_login(self.port, password)?;
         *self.cookie.lock().unwrap_or_else(|e| e.into_inner()) = Some(cookie.clone());
         Ok(Some(cookie))
     }
@@ -405,18 +368,7 @@ impl Server {
     /// up. The readiness probe only proves the socket replies; the auth route
     /// can still be compiling on the first request.
     pub fn login_with_retries(&self, attempts: usize) -> Result<Option<String>, String> {
-        let mut last = String::new();
-        for i in 0..attempts.max(1) {
-            match self.login() {
-                Ok(v) => return Ok(v),
-                Err(e) => {
-                    last = e;
-                    log_dbg!("login attempt {}/{attempts} failed: {last}", i + 1);
-                    std::thread::sleep(Duration::from_millis(500 * (i as u64 + 1)));
-                }
-            }
-        }
-        Err(last)
+        with_retries(attempts, || self.login())
     }
 
     pub fn session_cookie(&self) -> Option<String> {
@@ -593,24 +545,121 @@ fn spawn_watchdog(
     });
 }
 
+/// Run a fallible step a few times with a growing pause in between. Shared by
+/// the local and the remote login, which both race a server that answers the
+/// readiness probe slightly before its auth route is warm.
+pub fn with_retries<T>(
+    attempts: usize,
+    mut step: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut last = String::new();
+    for i in 0..attempts.max(1) {
+        match step() {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                last = e;
+                log_dbg!("login attempt {}/{attempts} failed: {last}", i + 1);
+                std::thread::sleep(Duration::from_millis(500 * (i as u64 + 1)));
+            }
+        }
+    }
+    Err(last)
+}
+
+/// `POST /api/web-auth` on `127.0.0.1:<port>`: trade a password for the
+/// `pi_web_session=<token>` pair pi-web mints. Used for the embedded server
+/// and, through an SSH tunnel's local end, for remote hosts — in both cases
+/// over loopback from Rust, so the password never reaches the page.
+pub fn web_auth_login(port: u16, password: &str) -> Result<String, String> {
+    let body = serde_json::json!({ "password": password }).to_string();
+    let request = format!(
+        "POST /api/web-auth HTTP/1.1\r\n\
+         Host: 127.0.0.1:{}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n{}",
+        port,
+        body.len(),
+        body
+    );
+    let response = http_request(port, &request)?;
+
+    let status_ok = response
+        .lines()
+        .next()
+        .map(|l| l.contains(" 200"))
+        .unwrap_or(false);
+    if !status_ok {
+        let status = response.lines().next().unwrap_or("(no status line)");
+        return Err(format!("pi-web rejected the shell's login: {status}"));
+    }
+
+    // Take name=value and drop the attributes; the webview supplies its own
+    // Path and the HttpOnly/Secure flags are meaningless for a JS-set cookie.
+    let cookie = response
+        .lines()
+        .find_map(|line| {
+            let rest = line.strip_prefix("Set-Cookie:").or_else(|| line.strip_prefix("set-cookie:"))?;
+            let pair = rest.trim().split(';').next()?.trim();
+            pair.starts_with("pi_web_session=").then(|| pair.to_string())
+        })
+        .ok_or_else(|| "pi-web accepted the login but set no session cookie".to_string())?;
+
+    log_dbg!("login: session cookie obtained on port {port} ({} bytes)", cookie.len());
+    Ok(cookie)
+}
+
 /// One bare HTTP/1.1 GET. Any well-formed status line proves the server is up —
 /// including the 401 a password-protected pi-web answers with.
 fn http_probe(port: u16) -> bool {
+    http_status(port).is_some()
+}
+
+/// `GET /` on `127.0.0.1:<port>` and return the response head (status line and
+/// headers), or None when nothing answered with HTTP. Through an SSH tunnel a
+/// remote that is down still ACCEPTS the connection (ssh.exe owns the local
+/// socket) and then closes it, which lands here as None — exactly right.
+pub fn http_head(port: u16) -> Option<String> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)) else {
-        return false;
-    };
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(1500)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(2500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
     let req = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(req.as_bytes()).is_err() {
-        return false;
+    stream.write_all(req.as_bytes()).ok()?;
+    let mut head = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+    // Only the head is needed; stop at the blank line or after a few KB.
+    while head.len() < 8192 {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                head.extend_from_slice(&chunk[..n]);
+                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
     }
-    let mut head = [0u8; 16];
-    match stream.read(&mut head) {
-        Ok(n) if n >= 5 => head.starts_with(b"HTTP/"),
-        _ => false,
+    if !head.starts_with(b"HTTP/") {
+        return None;
     }
+    let text = String::from_utf8_lossy(&head).into_owned();
+    Some(match text.find("\r\n\r\n") {
+        Some(end) => text[..end].to_string(),
+        None => text,
+    })
+}
+
+/// The numeric status of `GET /`, or None when nothing answered with HTTP.
+pub fn http_status(port: u16) -> Option<u16> {
+    let head = http_head(port)?;
+    head.lines()
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 /// Send one raw HTTP/1.1 request over loopback and return the response head.

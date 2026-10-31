@@ -8,12 +8,14 @@
 mod app;
 mod commands;
 mod guard;
+mod hosts;
 mod job;
 pub mod log;
 mod menu;
 mod migrate;
 mod paths;
 mod proc;
+mod remote;
 mod server;
 mod theme;
 
@@ -67,6 +69,8 @@ pub fn run() {
 
             tauri_app.manage(AppState::new(paths));
 
+            let nav_handle = handle.clone();
+            let new_win_handle = handle.clone();
             let mut window = WebviewWindowBuilder::new(
                 tauri_app,
                 app::MAIN_WINDOW,
@@ -78,14 +82,29 @@ pub fn run() {
             // pi-web's Metro dark canvas (--bg) — avoids a pre-paint flash.
             .background_color(tauri::window::Color(0x0A, 0x0A, 0x0A, 0xFF))
             .initialization_script(PRELOAD)
+            .on_navigation(move |url| {
+                if nav_handle.state::<AppState>().is_internal_url(url) {
+                    return true;
+                }
+                app::open_external(url);
+                false
+            })
+            .on_new_window(move |url, _features| {
+                if new_win_handle.state::<AppState>().is_internal_url(&url) {
+                    return tauri::webview::NewWindowResponse::Allow;
+                }
+                app::open_external(&url);
+                tauri::webview::NewWindowResponse::Deny
+            })
             .on_page_load(|webview, payload| {
                 if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                     let handle = webview.app_handle();
                     // Backstop for the capture in setup(): the first page to
                     // load IS a bundled one, so its URL is the local base.
                     handle.state::<AppState>().capture_local_base(payload.url());
-                    // First load of the pi-web origin: hand the page the session
-                    // cookie the shell already obtained, then let it reload.
+                    // First load of a backend origin (local or remote): hand
+                    // the page the session cookie the shell already obtained,
+                    // then let it reload.
                     //
                     // When that reload IS happening, the CTA has to wait for it.
                     // Delivering into a page that is about to be replaced looked
@@ -98,6 +117,15 @@ pub fn run() {
                         // an update reloads the server.
                         app::flush_update_notice(handle);
                     }
+                    app::sync_title(handle);
+                }
+            })
+            // The page's <title> must never become the native title: the
+            // window always says `Pi` (local) or `Pi — <label>` (remote).
+            .on_document_title_changed(|window, _title| {
+                let expected = window.app_handle().state::<AppState>().expected_title();
+                if window.title().ok().as_deref() != Some(expected.as_str()) {
+                    let _ = window.set_title(&expected);
                 }
             });
             if let Some(theme) = restored {
@@ -126,17 +154,18 @@ pub fn run() {
                 Err(e) => log_dbg!("local base unavailable at setup ({e}) — taking it from the first page load"),
             }
 
-            // Keep the native window/taskbar title as the app name: the embedded
-            // pi-web page sets its own <title>, and letting that reach the OS
-            // window would make the shell present as something else.
-            window.set_title("Pi")?;
+            // Keep the native window/taskbar title as the app name (plus the
+            // remote host's label when one is active): the embedded pi-web page
+            // sets its own <title>, and letting that reach the OS window would
+            // make the shell present as something else.
+            let title = tauri_app.state::<AppState>().expected_title();
+            window.set_title(&title)?;
 
             // The bar stays visible; Electron's `autoHideMenuBar` is not
             // reproduced. See PORTING.md — reveal-on-Alt was built and measured,
             // and the Alt press does not reach the page reliably enough to be
             // the only way to the menu.
-            let menu = menu::build(&handle)?;
-            tauri_app.set_menu(menu)?;
+            menu::install(&handle)?;
             tauri_app.on_menu_event(|app, event| {
                 menu::handle(app, event.id().as_ref());
             });
@@ -160,10 +189,11 @@ pub fn run() {
                 if !state.is_quitting() {
                     state.mark_quitting();
                     // The job object would reap the tree on its own once this
-                    // process dies; doing it explicitly frees the port and the
-                    // runtime's file handles immediately, which matters when the
-                    // user relaunches straight away.
-                    app::kill_server(handle);
+                    // process dies; doing it explicitly frees the ports (the
+                    // server's and the SSH tunnel's) and the runtime's file
+                    // handles immediately, which matters when the user
+                    // relaunches straight away.
+                    app::kill_all(handle);
                 }
             }
             _ => {}

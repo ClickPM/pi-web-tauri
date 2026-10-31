@@ -1,0 +1,28 @@
+{
+  "active": "local",
+  "keepLocalRunning": true,
+  "hosts": [
+    {
+      "id": "mac-mini",
+      "label": "Mac mini",
+      "sshTarget": "mac",
+      "sshPort": 22,
+      "localPort": 45001,
+      "remoteHost": "127.0.0.1",
+      "remotePort": 30141,
+      "passwordEnv": "PI_WEB_REMOTE_PASSWORD_MAC",
+      "password": ""
+    },
+    {
+      "id": "arch-130",
+      "label": "Arch Linux (130)",
+      "sshTarget": "130",
+      "sshPort": 22,
+      "localPort": 45002,
+      "remoteHost": "127.0.0.1",
+      "remotePort": 30141,
+      "passwordEnv": "PI_WEB_REMOTE_PASSWORD_130",
+      "password": ""
+    }
+  ]
+}

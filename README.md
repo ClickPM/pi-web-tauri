@@ -31,13 +31,15 @@ pi-web-tauri/
 │   │   ├── lib.rs              # 插件/窗口/菜单/注入脚本装配
 │   │   ├── app.rs              # 启动与更新状态机、运行时锁、CTA 投递
 │   │   ├── server.rs           # 端口持久化、起 pi-web、等就绪、停服务
+│   │   ├── hosts.rs            # %APPDATA%\Pi\hosts.json 解析/校验/写回 active
+│   │   ├── remote.rs           # 远端主机：SSH 本地端口转发 + 就绪探测 + 换 cookie
 │   │   ├── guard.rs            # 驱动 guard-cli.js（不含任何完整性逻辑）
 │   │   ├── job.rs              # Job Object（win32job，安全封装）
 │   │   ├── paths.rs            # 运行时/资源/userData 路径解析
 │   │   ├── migrate.rs          # 老 userData 与老运行时回退目录的一次性收养
 │   │   ├── theme.rs            # theme-state.json ↔ 窗口主题
 │   │   ├── commands.rs         # 页面能调的全部 3 个命令
-│   │   ├── menu.rs             # 应用菜单（常显，末尾是「刷新」按钮）
+│   │   ├── menu.rs             # 应用菜单（常显；「主机」切换器；末尾是「刷新」按钮）
 │   │   └── log.rs              # %TEMP%/pi-web-desktop-debug.log
 │   ├── inject/preload.js       # 注入页面的自定义 UI（Electron preload.js 的移植）
 │   ├── resources/guard/
@@ -56,7 +58,8 @@ pi-web-tauri/
 ├── scripts/
 │   ├── seed-node.ps1           # 供给 vendor/node（从 Electron 版原样复用）
 │   ├── test-runtime-guard.js   # 运行时守卫回归测试（npm run test:guard）
-│   └── prune-seed.js           # 打包前删掉 runtime-seed 里的 .map（约 157MB）
+│   ├── prune-seed.js           # 打包前删掉 runtime-seed 里的 .map（约 157MB）
+│   └── remote/                 # 远端常驻模板：systemd --user / launchd / hosts.example.json
 ├── build/                      # 图标 SVG 源 + _make_icons.js
 └── PORTING.md                  # 每个坑的实测结论、未达成项与已知降级
 ```
@@ -86,6 +89,78 @@ pi-web-tauri/
 8. **导航**：窗口先显示 `index.html`，就绪后 navigate 到 `http://127.0.0.1:<port>/`（**不带内嵌凭据** —— 带了会让页面里所有相对路径 `fetch()` 直接抛异常，见 PORTING.md 坑 4），首帧加载完成时把 cookie 注入页面并重载一次。
 9. **检查更新**：启动 5 秒后自动静默检查（刚自愈过 2 分钟内跳过），或菜单手动触发。装进兄弟目录 `.runtime-seed.staging` → 同一套校验验收 → `rename` 原子换入 → 重启服务并刷新页面。
 
+## 多主机切换（Windows / macOS / Linux）
+
+同一个窗口里随时在 **Windows 本地（内嵌服务）**、**Mac mini**、**Arch Linux (130)** 等主机之间切换：菜单栏 **主机(&H)**，或 `Ctrl+Alt+1`（本地）/ `Ctrl+Alt+2`、`3`…（按 `hosts.json` 顺序）。
+
+**架构**：远端的 pi-web 只监听它自己的 `127.0.0.1:30141`；外壳用 **Windows 自带的** `C:\Windows\System32\OpenSSH\ssh.exe` 建 `-L` 本地端口转发到本机 `127.0.0.1:<localPort>`（45000–48999），WebView 只和本机回环说话。口令由外壳在回环上 `POST /api/web-auth` 换成 cookie，**不进页面 URL、不进前端 JS**。`ssh.exe` 进 Job Object，外壳被强杀时隧道一并回收。
+
+### 1. Windows 端（本机）
+
+1. 确认 `C:\Windows\System32\OpenSSH\ssh.exe` 存在（「设置 → 系统 → 可选功能 → OpenSSH 客户端」）。**不会**使用 Git Bash / MSYS 的 ssh。
+2. 在 `%USERPROFILE%\.ssh\config` 里配好主机别名与密钥，并**手动连一次**确认指纹（外壳以 `BatchMode=yes` 运行，不会弹密码框或指纹确认）：
+   ```powershell
+   C:\Windows\System32\OpenSSH\ssh.exe mac  'echo ok'
+   C:\Windows\System32\OpenSSH\ssh.exe 130  'echo ok'
+   ```
+3. 复制模板并按需修改：
+   ```powershell
+   Copy-Item scripts\remote\hosts.example.json $env:APPDATA\Pi\hosts.json
+   ```
+4. 远端设了口令时，把口令放进**用户环境变量**（`passwordEnv` 指向它，优先于文件里的 `password`）：
+   ```powershell
+   [Environment]::SetEnvironmentVariable('PI_WEB_REMOTE_PASSWORD_130', '<与远端 PI_WEB_PASSWORD 相同>', 'User')
+   ```
+   改完环境变量需重启 Pi；改 `hosts.json` 只需菜单「主机 → 重新读取 hosts.json」。
+
+`hosts.json` 字段：
+
+| 字段 | 说明 |
+|---|---|
+| `active` | 上次激活的主机（`"local"` 或某个 `id`），切换成功后自动写回（只改这一个值，其余内容原样保留） |
+| `keepLocalRunning` | 默认 `true`：切去远端时本地服务继续后台运行，切回秒开；启动即远端时本地服务懒启动 |
+| `id` | 唯一，不能为 `local`，仅限字母数字 `- _ .` |
+| `sshTarget` | `~/.ssh/config` 别名或 `user@host`（不能以 `-` 开头） |
+| `sshPort` | 可省略（交给 ssh config） |
+| `localPort` | **必须在 45000–48999** 且互不重复；每台主机一个固定端口 = 一个独立 origin = 独立持久的 `localStorage` |
+| `remoteHost` / `remotePort` | 远端 pi-web 的监听地址，默认 `127.0.0.1:30141` |
+| `passwordEnv` / `password` | 口令来源；都为空 = 远端无口令 |
+
+不合法的条目会被跳过（原因写进调试日志，「重新读取」时也会弹窗列出），不影响其余主机和本地模式。文件不存在时菜单里只有「Windows 本地」。
+
+### 2. Arch Linux（systemd --user）
+
+```bash
+npm install -g @agegr/pi-web --allow-scripts=@agegr/pi-web,node-pty  # 需要 Node ≥ 22.19
+mkdir -p ~/.config/pi-web ~/.config/systemd/user
+printf 'PI_WEB_PASSWORD=%s\n' "$(openssl rand -hex 16)" > ~/.config/pi-web/env && chmod 600 ~/.config/pi-web/env
+cp scripts/remote/pi-web.service ~/.config/systemd/user/
+command -v pi-web                     # 不在 /usr/bin 或 ~/.local/bin（如 nvm）时改 service 里的 PATH
+systemctl --user daemon-reload && systemctl --user enable --now pi-web
+loginctl enable-linger "$USER"        # 无人登录时也常驻
+curl -sI http://127.0.0.1:30141/      # 200，或带口令时 307 → /login
+```
+
+### 3. macOS（launchd LaunchAgent）
+
+```bash
+npm install -g @agegr/pi-web --allow-scripts=@agegr/pi-web,node-pty
+cp scripts/remote/com.agegr.piweb.plist ~/Library/LaunchAgents/
+/usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:PI_WEB_PASSWORD $(openssl rand -hex 16)" \
+    ~/Library/LaunchAgents/com.agegr.piweb.plist        # 不要口令就跳过这步
+chmod 600 ~/Library/LaunchAgents/com.agegr.piweb.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agegr.piweb.plist
+curl -sI http://127.0.0.1:30141/
+```
+
+还需在「系统设置 → 通用 → 共享」打开「远程登录」。模板里的 PATH 已包含 `/opt/homebrew/bin:/usr/local/bin`。
+
+### 远端模式下的差异
+
+- 窗口标题变为 `Pi — <label>`；本地为 `Pi`。
+- **不注入 `window.piDesktop`**：原生目录对话框浏览的是 Windows 本机、返回 `D:\...`，对远端无意义；pi-web 自动回退为网页内目录浏览（列的是远端文件系统）。主题同步原生标题栏照常工作。
+- 「检查更新…」禁用（它只管本机内嵌运行时）；「重启内嵌服务」变为「重连当前远端」（重建隧道并重新认证）。启动 5 秒后的静默更新检查只在本地模式执行，更新结果 toast 在切回本地后才显示。
+- 连接失败或隧道中途断开会显示错误页（含 SSH stderr 与排障提示），随时 `Ctrl+Alt+1` 切回本地。
 ## 目标机器需要什么
 
 - **不需要 Node / npm**（已全部内置）。

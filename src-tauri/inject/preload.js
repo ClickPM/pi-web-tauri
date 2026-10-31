@@ -12,10 +12,14 @@
  * so:
  *
  *   - everything here is reachable (and forgeable) by page script;
- *   - the four commands it can reach are therefore deliberately parameterless
+ *   - the three commands it can reach are therefore deliberately parameterless
  *     or trivially-typed, and each one's worst case is a native dialog the user
- *     must confirm, a menu bar toggling, a repainted title bar, or an npm
- *     install of one fixed package from one fixed registry.
+ *     must confirm, a repainted title bar, or an npm install of one fixed
+ *     package from one fixed registry.
+ *
+ * On a REMOTE host (tunnel port 45000..=48999) the directory picker bridge is
+ * not installed at all — see "Bridges pi-web itself looks for" below. Theme
+ * sync still runs there, so the native title bar follows the remote's theme.
  *
  * See PORTING.md ("坑 2" and "坑 8") for the full threat note.
  *
@@ -74,16 +78,40 @@
   // ---------------------------------------------------------------------------
   // Bridges pi-web itself looks for
   // ---------------------------------------------------------------------------
-  window.piWebDesktop = { isDesktop: true, platform: "win32", shell: "tauri" };
+  // Which backend is this page? Decided SYNCHRONOUSLY from the port, because
+  // this runs at document-start and pi-web probes `window.piDesktop` while its
+  // sidebar mounts — there is no later moment to take it back.
+  //
+  //   30000..=44999  embedded pi-web on THIS machine (server.rs port pool)
+  //   45000..=48999  SSH tunnel to a REMOTE host (hosts.rs tunnel pool)
+  //
+  // On a remote host the native folder dialog would be actively harmful: it
+  // browses THIS Windows machine and hands back `D:\...`, which the agent on
+  // the Mac / Linux box then fails to open. Without `window.piDesktop` pi-web
+  // falls back to its own in-page directory browser, which lists the REMOTE
+  // filesystem — exactly right. Must stay in step with hosts::REMOTE_PORT_*.
+  var PORT = Number(location.port);
+  var LOCAL_BACKEND = PORT >= 30000 && PORT <= 44999;
+  var REMOTE_BACKEND = PORT >= 45000 && PORT <= 48999;
+
+  window.piWebDesktop = {
+    isDesktop: true,
+    platform: "win32",
+    shell: "tauri",
+    remote: REMOTE_BACKEND,
+  };
 
   // pi-web's OWN desktop bridge (upstream v0.7.13+): native directory picker.
   // Contract (pi-web components/SessionSidebar.tsx):
   //   selectDirectory(): Promise<string | null>
-  window.piDesktop = {
-    selectDirectory: function () {
-      return invoke("select_directory");
-    },
-  };
+  // Local backend only — see above. (The shell's own status pages never use it.)
+  if (LOCAL_BACKEND) {
+    window.piDesktop = {
+      selectDirectory: function () {
+        return invoke("select_directory");
+      },
+    };
+  }
 
   // ---------------------------------------------------------------------------
   // In-page update-result CTA (top-right toast)

@@ -1,0 +1,41 @@
+# pi-web as a systemd --user service (Arch Linux / any systemd distro).
+#
+# Listens on 127.0.0.1:30141 ONLY. The Windows shell reaches it through an SSH
+# local port forward (`ssh -L 127.0.0.1:4500x:127.0.0.1:30141`), so pi-web is
+# never exposed on the LAN.
+#
+# Install:
+#   npm install -g @agegr/pi-web            # or: npm i -g --prefix ~/.local @agegr/pi-web
+#   mkdir -p ~/.config/pi-web ~/.config/systemd/user
+#   printf 'PI_WEB_PASSWORD=%s\n' "$(openssl rand -hex 16)" > ~/.config/pi-web/env
+#   chmod 600 ~/.config/pi-web/env
+#   cp pi-web.service ~/.config/systemd/user/
+#   # If pi-web is NOT at /usr/bin/pi-web (nvm, ~/.local …), fix ExecStart below:
+#   #   command -v pi-web
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pi-web
+#   loginctl enable-linger "$USER"          # keep it running without a login session
+#
+# Check:   systemctl --user status pi-web ; journalctl --user -u pi-web -f
+#          curl -sI http://127.0.0.1:30141/   (expect 200, or 307 -> /login with a password)
+
+[Unit]
+Description=pi-web (loopback only, reached via SSH tunnel)
+After=network.target
+
+[Service]
+Type=simple
+# PI_WEB_PASSWORD=<secret>   (the same value goes into the Windows env var named
+# by passwordEnv in %APPDATA%\Pi\hosts.json). Leading '-' = optional file.
+EnvironmentFile=-%h/.config/pi-web/env
+Environment=PI_WEB_NO_OPEN=1
+Environment=NODE_ENV=production
+# nvm installs live outside the default PATH; add yours if needed.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+WorkingDirectory=%h
+ExecStart=/usr/bin/env pi-web -H 127.0.0.1 -p 30141 --no-open
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

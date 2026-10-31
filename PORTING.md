@@ -375,6 +375,76 @@ Rust 侧（`guard.rs`）只做三件事：拼命令行、解析那一行 JSON、
 
 ---
 
+## 多主机切换（Host Switcher）—— 架构决策
+
+同一个窗口在 **Windows 本地（内嵌服务）** 与局域网里的 **Mac mini / Arch Linux (130)** 之间切换。实现：`hosts.rs`（配置）、`remote.rs`（隧道会话）、`app.rs` 的 `ActiveBackend` 状态机、`menu.rs` 的「主机(&H)」。
+
+### 为什么走外壳托管的 SSH 本地端口转发，而不是直连局域网 IP
+
+- **ACL 一个字都不用改**：`capabilities/remote.json` 仍是 `http://127.0.0.1:*` + 那 3 个命令。放行 `http://192.168.x.x:*` 等于把命令面授给局域网里任何能被导航到的明文页面。
+- **明文不上网线**：远端 pi-web 只监听它自己的 `127.0.0.1:30141`，口令和 cookie 只在 SSH 加密信道里走。
+- **口令不进页面**：外壳在 `127.0.0.1:<localPort>` 上 `POST /api/web-auth` 换 cookie（复用 `server::web_auth_login`），与本地模式完全同构。
+
+**实测**（Windows 内嵌的 pi-web 0.9.1 经 `-R` 反向挂到 130 的 `127.0.0.1:30141` 模拟远端，再走与外壳完全相同的 `-L 127.0.0.1:45002:127.0.0.1:30141`）：
+
+```
+GET / via 45002            -> 307 Location=/login     ← 视为就绪且需要认证
+POST /api/web-auth         -> 200 cookie=pi_web_session=v1.…
+GET /api/sessions + cookie -> 200
+GET /api/sessions no cookie-> 401
+POST 错误口令              -> 401
+```
+
+pi-web middleware 的 Host 白名单对 `127.0.0.1:45002` 放行（它对 IP 字面量一律放行，不比端口），所以隧道端口与远端监听端口不同**不需要** `PI_WEB_ALLOWED_HOSTS`。
+
+### 端口分段：`30000..=44999` 本地，`45000..=48999` 远端
+
+1. **每台远端一个固定端口 = 一个独立 origin = 独立持久的 `localStorage`**（坑 1 的逻辑，按主机复制一份）。主题、隐藏目录、未读标记不会在主机之间串，也不会因端口漂移被重置。
+2. **低于 49152**：不落进 Windows 动态端口范围，下次启动大概率还空着。
+3. **与本地池不重叠**：`preload.js` 在 document-start **同步**执行，只凭 `Number(location.port)` 就能知道自己在哪台机器上（见下）。
+4. 启动隧道前先探测端口；被占用直接报「端口冲突」，不去猜另一个端口（那会静默换 origin）。
+
+`hosts.json` 中 `localPort` 不在 45000–48999、与他人冲突、`id` 重复或为 `local`、`sshTarget` 以 `-` 开头（防 `-oProxyCommand=` 注入，`ssh_args` 另加 `--` 双保险）的条目逐条跳过并记日志，**不影响启动**。写回 `active` 时只替换顶层那一个值（字节级保留用户的其余内容、缩进、换行、BOM），临时文件 + rename 原子替换，且写前自检能否解析。
+
+### 为什么远端屏蔽 `window.piDesktop`
+
+pi-web 的侧边栏挂载时就探测 `window.piDesktop.selectDirectory`。远端模式下若仍暴露它，点击会弹出 **Windows 本机**的文件夹对话框并返回 `D:\...`，远端 macOS/Linux 上的智能体随即打不开这个路径。注入脚本没有「稍后再撤销」的机会（document-start 同步、挂载即探测），所以只能按端口决定：本地段挂、远端段不挂。不挂时 pi-web 自动回退到网页内目录浏览器 —— 它通过 API 列的正是**远端**文件系统，这才是对的行为。`theme_changed` 保留，原生标题栏跟随远端页面的亮暗色。
+
+顺带：`apply_update` 命令在远端页面上也能被调用（ACL 按 origin 不按端口），Rust 侧在非本地目标时直接拒绝；「检查更新…」菜单项在远端禁用。
+
+### SSH 子进程：System32 OpenSSH + Job Object
+
+- **只用** `C:\Windows\System32\OpenSSH\ssh.exe`（不存在才回退 PATH，且跳过 `\Git\`、`msys`、`mingw`、`cygwin`、`\usr\bin\` 下的 ssh）。MSYS 系 ssh 用自己的 HOME 仿真解析 `~/.ssh`，config / 密钥 / known_hosts 全失效，`ssh 130` 甚至会被当成 `0.0.0.130`。
+- 参数：`-N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:<local>:<remoteHost>:<remotePort> [-p N] -- <target>`。`BatchMode` 意味着**必须**是密钥免密 + 已信任指纹，外壳不会弹任何交互。
+- `.no_console()` + spawn 后立刻 `job.assign()`：外壳被任务管理器强杀时，内核连坐回收 `ssh.exe`，不留孤儿占端口。正常切换/退出时显式 kill 并等待端口释放（`stop()` 最多等 3 秒）。
+- stderr 收进 20,000 字节的环形缓冲；ssh 在就绪前退出则立即中止 12 秒的轮询并把 stderr + 按关键字归类的排障提示（认证失败 / 指纹 / 解析失败 / 超时 / 远端无服务 / 端口占用）显示在 `error.html`。隧道中途断开同样走 `error.html`，但仅当该主机仍是当前目标且不是主动切换/退出（会话序号 `serial` 防止旧隧道迟到的退出事件误报）。
+
+### 状态机要点（`app.rs`）
+
+- `ActiveBackend::Local(Arc<Server>) | Remote(Arc<RemoteSession>)`；`is_internal_url`、`inject_session_cookie`、`show_pi_web` 都只认**当前激活**后端。别的主机的隧道端口在 `on_navigation` 里算外部链接。
+- `capture_local_base` 按**端口段**排除（30000–48999 一律不是外壳状态页），而不是只比对当前后端 —— 切换途中上一台主机的页面可能在状态已指向别处之后才加载完。
+- **cookie 是按主机名而不是按端口隔离的**：本地服务与所有隧道都是 `127.0.0.1`，共用同一个 `pi_web_session` 槽位，后登录的会覆盖前一个。所以「是否已注入」不再是每个后端一个布尔，而是比对「cookie 罐里当前装的是哪个 token」—— 来回切换时每次都会装回正确的 token 并 reload 一次。
+- 切换顺序：目标/标题/菜单打勾立即更新 → 窗口先回 `index.html`（显示「正在连接 …」）→ 建隧道、等就绪、换 cookie → 再 navigate。切换期间绝不停留在上一台主机的可操作画面上。
+- `keepLocalRunning`（默认 `true`）：切去远端时本地 `Server` 留在后台；启动时 `active` 就是远端则 recover/migrate/verify + `Server::start` 全部推迟到第一次切回本地（`local_prepared` 保证只跑一次，`runtime_dir()` 的缓存语义不变）。本地服务在后台崩溃时不弹模态框，只丢弃句柄，切回时重启。
+- 启动 5 秒后的静默更新检查只在本地模式且本地服务已在跑时执行；后台更新完成后不会把窗口从远端拽回本地，结果 toast 等切回本地再投递。
+- 窗口标题：本地 `Pi`，远端 `Pi — <label>`；`on_document_title_changed` + 每次 page-load 都把页面的 `<title>` 改回这个值。
+
+### 实测与真机冒烟结论
+
+在 Windows 11 本机（WebView2 CDP 探针 + 真实 `C:\Windows\System32\OpenSSH\ssh.exe` 到 `130` 的隧道）完成端到端窗口级实测：
+
+- **编译与单测**：`cargo check`、`cargo clippy --all-targets` 零警告通过；`cargo test` **23 passed, 0 failed**（含 Windows 专属的 `prefers_the_system_openssh`）。
+- **无 `hosts.json` 本地回归**：首启分配并持久化 `41674`，二次启动 749ms 内复用 `41674`，`localStorage` 标记原样读回；`typeof window.piDesktop.selectDirectory === "function"`、`window.piWebDesktop.remote === false`、`/api/sessions -> 200`、标题 `Pi`、`theme-state.json` 跨重启恢复。
+- **远端 `45002`（带 UTF-8 BOM 的 `hosts.json`，`active: "arch-130"`）**：
+  - 子进程为 `C:\WINDOWS\System32\OpenSSH\ssh.exe`，立即进 Job Object（`job object: assigned pid 51568`）；启动即远端时本地 `node.exe` 子进程数为 `0`（懒启动生效）；
+  - 562ms 探到 `HTTP 307` → 自动换取 126 字节 `pi_web_session` Cookie 并注入 reload → `/api/sessions -> 200`；
+  - 页面内 `typeof window.piDesktop === "undefined"`、`window.piWebDesktop.remote === true`；`theme_changed` 仍正常把 `theme-state.json` 同步为 `light`；
+  - 页面内篡改 `document.title = "Attempted Tamper"` 后，Win32 顶层窗口标题仍保持 `Pi — Arch Linux (130)`；
+  - **正常关窗**与 **`Stop-Process -Force` 强杀**两种场景下，子进程 `ssh.exe` 均立即退出（`alive=False`），`45002` 端口立即释放（`listening=False`）。
+- **真机冒烟顺手抓到并修掉的一个首帧竞态**：本地模式首启要跑 ~1.5s 的 guard 预检，首帧 `index.html` 早就加载完并捕获了 `local_base`；而启动即连远端且瞬间失败（如 `45002` 已被占用，1ms 内报错）时，`show_error -> show_local("error.html")` 早于首帧 `on_page_load`（约 30ms），导致跳转曾被静默丢弃。现 `show_local` 在非 `index.html` 且 `local_base` 尚未就绪时短暂轮询等待，实测端口预占场景能稳定落到 `Pi — Arch Linux (130) 连接失败` 错误页。
+- **两台远端常驻服务已真机部署并验证**：`130`（`systemd --user` + `linger`，仅监听 `127.0.0.1:30141`）与 `mac`（`launchd` LaunchAgent，仅监听 `127.0.0.1:30141`）均已上线，从 Windows 经 `45002` / `45001` 隧道实测 `POST /api/web-auth -> 200`、`GET /api/sessions -> 200`。
+---
+
 ## 验收状态
 
 | # | 验收项 | 状态 |

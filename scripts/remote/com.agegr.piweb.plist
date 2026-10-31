@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  pi-web as a macOS LaunchAgent. Listens on 127.0.0.1:30141 ONLY; the Windows
+  shell reaches it through an SSH local port forward.
+
+  Install (bash 3.2 / zsh both fine):
+    npm install -g @agegr/pi-web
+    mkdir -p ~/Library/LaunchAgents
+    cp com.agegr.piweb.plist ~/Library/LaunchAgents/
+    # Set the password (same value as the Windows env var named by passwordEnv):
+    /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:PI_WEB_PASSWORD $(openssl rand -hex 16)" \
+        ~/Library/LaunchAgents/com.agegr.piweb.plist
+    chmod 600 ~/Library/LaunchAgents/com.agegr.piweb.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agegr.piweb.plist
+    # after edits:  launchctl bootout gui/$(id -u)/com.agegr.piweb ; then bootstrap again
+
+  Check:  launchctl print gui/$(id -u)/com.agegr.piweb | head -30
+          tail -f /tmp/pi-web.log
+          curl -sI http://127.0.0.1:30141/
+
+  Remote Login must be on: System Settings > General > Sharing > Remote Login.
+  Leave PI_WEB_PASSWORD empty to run without a password (loopback only).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agegr.piweb</string>
+
+  <!-- /bin/sh -c so PATH below is used to find node + pi-web (Homebrew on
+       Apple Silicon is /opt/homebrew, Intel / nodejs.org pkg is /usr/local). -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec pi-web -H 127.0.0.1 -p 30141 --no-open</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PI_WEB_NO_OPEN</key>
+    <string>1</string>
+    <key>NODE_ENV</key>
+    <string>production</string>
+    <key>PI_WEB_PASSWORD</key>
+    <string></string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>/tmp</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <!-- Restart on crash, not after a clean exit. -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>/tmp/pi-web.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/pi-web.log</string>
+</dict>
+</plist>

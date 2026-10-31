@@ -48,13 +48,17 @@
   </head>
   <body>
     <div class="wrap">
-      <h1>Pi Agent 启动失败</h1>
-      <p>本地服务未能正常启动。常见原因：未安装 Node.js，或运行时尚未就绪。</p>
+      <h1 id="head">Pi Agent 启动失败</h1>
+      <p id="hint">本地服务未能正常启动。常见原因：未安装 Node.js，或运行时尚未就绪。</p>
       <p id="msg"></p>
       <pre id="log"></pre>
     </div>
     <script>
-      window.__setError = function (msg, log) {
+      // head/hint are optional: the shell passes them for remote-host
+      // failures, where "the local service did not start" would be wrong.
+      window.__setError = function (msg, log, head, hint) {
+        if (head) document.getElementById("head").textContent = head;
+        if (hint) document.getElementById("hint").textContent = hint;
         document.getElementById("msg").textContent = "错误：" + (msg || "未知错误");
         document.getElementById("log").textContent = log || "(无日志输出)";
       };

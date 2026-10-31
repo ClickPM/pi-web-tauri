@@ -1,6 +1,6 @@
 [package]
 name = "pi-web-tauri"
-version = "0.4.0"
+version = "0.5.0"
 description = "Pi — desktop shell for pi-web (Tauri 2)"
 authors = ["pi-web-desktop"]
 edition = "2021"
