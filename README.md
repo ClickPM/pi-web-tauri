@@ -1,5 +1,10 @@
 # pi-web-tauri（Pi）
 
+> [!WARNING]
+> **⚠️ 项目已停止维护 / ARCHIVED & DEPRECATED**
+>
+> 本项目已停止更新并归档，后续开发已迁移至 **[ClickPM/Pi-Hosts](https://github.com/ClickPM/Pi-Hosts)**（基于 .NET 10 + WPF + WebView2 重写的桌面外壳）。仓库代码仅保留作为历史参考，不再接受 Issue、PR 或功能更新。
+
 把 [pi-web](https://github.com/agegr/pi-web)（pi 编程智能体的网页界面，npm 包 **`@agegr/pi-web`**）打包成一个**开箱即用的桌面应用**：双击即用，没有浏览器、没有地址栏、没有常驻终端窗口，**目标机器无需预装任何运行时**。
 
 这是 [pi-web-desktop](../pi-web-desktop)（Electron 版）的 **Tauri 2 + Rust 重写**。外壳换了，但运行时供给、自更新、完整性自愈这三块的**行为和文件格式保持一致** —— 老用户升级不重装运行时、不丢偏好。
